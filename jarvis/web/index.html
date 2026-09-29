@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JARVIS</title>
+  <style>
+    :root { color-scheme: dark; --panel:#0c1118; --line:#202c38; --text:#eaf4ff; --muted:#8da0b2; --accent:#8bdcff; }
+    * { box-sizing:border-box; }
+    body { margin:0; height:100vh; overflow:hidden; background:radial-gradient(circle at 62% 42%,#111f2d 0,#080c12 32%,#05070a 70%); color:var(--text); font:14px/1.45 Inter,Segoe UI,sans-serif; }
+    .shell { display:grid; grid-template-columns:240px 1fr; height:100%; }
+    aside { padding:24px 16px; border-right:1px solid rgba(255,255,255,.07); background:rgba(6,9,13,.78); backdrop-filter:blur(24px); }
+    .brand { letter-spacing:.3em; font-weight:700; font-size:13px; margin:4px 8px 28px; }
+    nav button { width:100%; border:0; background:transparent; color:#aebbc8; padding:11px 12px; text-align:left; border-radius:10px; margin:2px 0; cursor:pointer; }
+    nav button.active, nav button:hover { background:#121b24; color:white; }
+    .threads { margin:28px 12px 0; color:#68798a; font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
+    main { display:grid; grid-template-rows:1fr auto; min-width:0; }
+    .stage { position:relative; display:flex; align-items:center; justify-content:center; min-height:0; }
+    .status { position:absolute; top:34px; left:0; right:0; text-align:center; color:var(--muted); letter-spacing:.12em; font-size:11px; }
+    .orb-wrap { position:relative; width:min(50vw,480px); aspect-ratio:1; display:grid; place-items:center; }
+    .halo { position:absolute; inset:10%; border-radius:50%; background:radial-gradient(circle,rgba(121,219,255,.14),rgba(121,219,255,.04) 45%,transparent 68%); filter:blur(10px); animation:breathe 4s ease-in-out infinite; }
+    .orb { width:47%; aspect-ratio:1; border-radius:50%; background:radial-gradient(circle at 38% 32%,#ecfbff 0 2%,#a7e9ff 6%,#2a7391 26%,#102d3d 54%,#07131c 76%); box-shadow:0 0 45px rgba(91,210,255,.34), inset -22px -24px 48px rgba(0,0,0,.5); position:relative; animation:float 5s ease-in-out infinite; }
+    .orb:before,.orb:after { content:""; position:absolute; inset:-20%; border-radius:50%; border:1px solid rgba(137,223,255,.18); animation:spin 12s linear infinite; }
+    .orb:after { inset:-36%; border-style:dashed; opacity:.45; animation-direction:reverse; animation-duration:18s; }
+    .mode { position:absolute; bottom:14%; left:0; right:0; text-align:center; color:#c6eefe; font-size:12px; letter-spacing:.16em; text-transform:uppercase; }
+    .console { width:min(860px,calc(100% - 56px)); justify-self:center; padding:0 0 28px; }
+    .reply { min-height:48px; color:#cbd8e5; text-align:center; padding:0 12px 16px; white-space:pre-wrap; }
+    .input { display:flex; gap:10px; padding:8px; border:1px solid rgba(255,255,255,.09); border-radius:18px; background:rgba(12,17,24,.88); box-shadow:0 14px 50px rgba(0,0,0,.22); }
+    input { flex:1; border:0; outline:0; background:transparent; color:white; padding:12px 14px; font:inherit; }
+    .send { border:0; color:#041019; background:#bcecff; border-radius:12px; padding:0 18px; font-weight:700; cursor:pointer; }
+    .foot { margin-top:8px; text-align:center; color:#516273; font-size:11px; }
+    @keyframes breathe { 50% { transform:scale(1.08); opacity:.72; } }
+    @keyframes float { 50% { transform:translateY(-9px) scale(1.02); } }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    body.thinking .orb { animation:spin 3.3s linear infinite; }
+    body.executing .orb { box-shadow:0 0 65px rgba(91,210,255,.7), inset -22px -24px 48px rgba(0,0,0,.5); }
+    @media (max-width:760px){ .shell{grid-template-columns:1fr} aside{display:none}.orb-wrap{width:min(90vw,440px)}.console{width:calc(100% - 24px)} }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside>
+    <div class="brand">JARVIS</div>
+    <nav>
+      <button class="active">Talk to Jarvis</button>
+      <button>Oggi</button><button>Follow-up</button><button>Dettatura</button>
+      <button>Memoria</button><button>Routine</button><button>Skill</button><button>Connessioni</button>
+    </nav>
+    <div class="threads">Recent threads<br><br>Versione 0.1</div>
+  </aside>
+  <main>
+    <section class="stage">
+      <div class="status" id="status">CONNESSIONE IN CORSO</div>
+      <div class="orb-wrap">
+        <div class="halo"></div><div class="orb"></div><div class="mode" id="mode">IDLE</div>
+      </div>
+    </section>
+    <section class="console">
+      <div class="reply" id="reply">Avvia LM Studio e carica Qwen per iniziare.</div>
+      <form class="input" id="form"><input id="message" autocomplete="off" placeholder="Parla con Jarvis…"/><button class="send">Invia</button></form>
+      <div class="foot" id="model">LM Studio locale</div>
+    </section>
+  </main>
+</div>
+<script>
+const form=document.querySelector('#form'), input=document.querySelector('#message'), reply=document.querySelector('#reply'), mode=document.querySelector('#mode'), status=document.querySelector('#status'), model=document.querySelector('#model');
+function state(s){ mode.textContent=s; document.body.className=s.toLowerCase(); }
+async function health(){ try{ const r=await fetch('/api/health'); const d=await r.json(); status.textContent=d.ok?'JARVIS ONLINE':'LM STUDIO NON DISPONIBILE'; if(d.models?.length) model.textContent='Modello: '+d.models[0]; }catch{status.textContent='BACKEND NON DISPONIBILE'} }
+form.addEventListener('submit', async e=>{e.preventDefault(); const message=input.value.trim(); if(!message)return; input.value=''; reply.textContent=''; state('THINKING'); try{const r=await fetch('/api/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message})}); const d=await r.json(); if(!r.ok)throw new Error(d.detail||'Errore'); reply.textContent=d.reply; model.textContent='Modello: '+d.model; state(d.state||'SPEAKING'); setTimeout(()=>state('IDLE'),1200);}catch(err){reply.textContent=err.message;state('ERROR')}});
+health();
+</script>
+</body>
+</html>
