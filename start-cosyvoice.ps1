@@ -8,20 +8,22 @@ Set-Location $PSScriptRoot
 function Find-CondaExe {
     $command = Get-Command conda -ErrorAction SilentlyContinue
     if ($command -and $command.Source) {
-        return $command.Source
+        return [string]$command.Source
     }
 
-    $candidates = @(
+    $candidatePaths = @(
         (Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"),
         (Join-Path $env:LOCALAPPDATA "miniconda3\Scripts\conda.exe"),
         (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe"),
         (Join-Path $env:LOCALAPPDATA "anaconda3\Scripts\conda.exe"),
         (Join-Path $env:ProgramData "miniconda3\Scripts\conda.exe"),
         (Join-Path $env:ProgramData "anaconda3\Scripts\conda.exe")
-    ) | Where-Object { $_ -and (Test-Path $_) }
+    )
 
-    if ($candidates.Count -gt 0) {
-        return $candidates[0]
+    foreach ($candidate in $candidatePaths) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return [string]$candidate
+        }
     }
 
     throw "Conda non trovato. Esegui prima setup-cosyvoice.ps1 o verifica l'installazione di Miniconda."
