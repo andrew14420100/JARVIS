@@ -4,4 +4,5 @@ httpx>=0.27,<1
 psutil>=6,<8
 pydantic>=2.8,<3
 pydantic-settings>=2.4,<3
+gradio_client>=2.0,<3
 pytest>=8,<9
