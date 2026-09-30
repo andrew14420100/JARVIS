@@ -8,16 +8,30 @@ class Settings(BaseSettings):
     """Runtime configuration for JARVIS.
 
     Values can be overridden with environment variables prefixed by JARVIS_.
-    The heavy local voice/cognitive stack is optional and disabled in cloud previews.
+    The default AI brain is cloud-hosted and restricted to free routes only.
+    Heavy local voice/cognitive components remain optional.
     """
 
-    lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
+    brain_mode: str = "cloud"
     model: str = ""
     max_agent_iterations: int = 8
     request_timeout_seconds: float = 120.0
     user_name: str = "Signore"
 
-    # Hybrid reasoning. OpenJarvis is loaded only on the local desktop runtime.
+    # Public cloud AI. Secrets stay server-side and are never sent to React.
+    # The OpenRouter route is intentionally constrained to free-only model ids.
+    groq_api_key: str = ""
+    groq_model: str = "qwen/qwen3.8-27b"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openrouter/free"
+    cloud_app_name: str = "JARVIS"
+    cloud_app_url: str = ""
+
+    # Optional legacy/local fallback for development only. It is not used when
+    # brain_mode=cloud and is never selected automatically by the cloud router.
+    lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
+
+    # Hybrid reasoning. OpenJarvis remains optional; the main brain can be cloud.
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
     openjarvis_model: str = ""
