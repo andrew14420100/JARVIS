@@ -170,10 +170,7 @@ function startRecognition() {
     const parsed = normalizeWakeTranscript(finalText);
 
     if (!activeConversation) {
-      if (!parsed.activated) {
-        // Ignore room conversation until JARVIS is explicitly invoked.
-        return;
-      }
+      if (!parsed.activated) return;
 
       conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
       if (!parsed.command) {
@@ -253,8 +250,6 @@ async function bootstrapVoiceRuntime() {
     return;
   }
 
-  // If the browser already remembers microphone permission, start hands-free
-  // immediately without asking the user to touch the page again.
   if (navigator.permissions?.query) {
     try {
       const status = await navigator.permissions.query({ name: 'microphone' });
@@ -272,7 +267,6 @@ async function bootstrapVoiceRuntime() {
     }
   }
 
-  // First use only: browsers require a user gesture before showing the prompt.
   setVoiceState('permission-needed');
   setHint('Prima attivazione: tocchi una volta e consenta il microfono. Poi sarà automatico.');
   installOneTimeGesture(startVoiceRuntime);
@@ -420,8 +414,6 @@ async function speak(text, { greeting = false } = {}) {
   } catch (error) {
     if (error?.name === 'AbortError') return;
     console.warn('[JARVIS] TTS:', error);
-    // Voice output and microphone input are independent. Even if CosyVoice is
-    // not ready yet, immediately return to listening so spoken commands still work.
     speaking = false;
     reopenConversation();
   }
@@ -437,7 +429,11 @@ window.addEventListener('jarvis:reply-ready', (event) => {
   speak(event?.detail?.text || '', { greeting: false });
 });
 
-bootstrapVoiceRuntime();
+if (document.readyState === 'complete') {
+  window.setTimeout(bootstrapVoiceRuntime, 0);
+} else {
+  window.addEventListener('load', bootstrapVoiceRuntime, { once: true });
+}
 
 window.addEventListener('beforeunload', () => {
   voiceRuntimeStarted = false;
