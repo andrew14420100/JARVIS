@@ -19,9 +19,10 @@ class Settings(BaseSettings):
     user_name: str = "Signore"
 
     # Public cloud AI. Secrets stay server-side and are never sent to React.
-    # Z.AI is preferred when configured because GLM-4.7-Flash is currently
-    # listed by Z.AI at $0 input/$0 output. Only explicitly free model ids are
-    # accepted by the router.
+    # NVIDIA Nemotron 3 Ultra is preferred when configured; every provider in
+    # this router is constrained to a free endpoint/model id.
+    nvidia_api_key: str = ""
+    nvidia_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     zai_api_key: str = ""
     zai_model: str = "glm-4.7-flash"
     groq_api_key: str = ""
