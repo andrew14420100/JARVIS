@@ -17,12 +17,6 @@ from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 _WAKE_ALIASES = r"(?:hey\s+)?(?:jarvis|jervis|gervis|giarvis|jarviss|giannis|giardini|giardinis)"
 
 
-def _clean_ambient_transcript(text: str) -> str:
-    value = " ".join(text.strip().split())
-    value = re.sub(rf"\b{_WAKE_ALIASES}\b[,.!?;:]*", "", value, flags=re.I)
-    return " ".join(value.split()).strip()
-
-
 def _strip_wake_phrase(text: str) -> str:
     value = " ".join(text.strip().split())
     value = re.sub(
@@ -38,9 +32,6 @@ def _strip_wake_phrase(text: str) -> str:
 def main() -> None:
     settings = get_settings()
     settings.voice_enabled = True
-    # Respect JARVIS_PRESENCE_ENABLED from .env. Do not force ambient speech
-    # transcription on desktop: a weak microphone can otherwise turn room noise
-    # into invented context and contaminate the actual command.
     input_device = settings.audio_input_device.strip() or None
 
     stt = LocalSTT(
@@ -92,6 +83,16 @@ def main() -> None:
             "aggiungi il campione e avvia start-cosyvoice.ps1 quando disponibile."
         )
 
+    # Warm Whisper before the user ever says the wake word. This moves model
+    # loading/CUDA initialization to startup instead of making the first spoken
+    # request appear frozen after "Ti ascolto...".
+    try:
+        print("[STT] Precarico Whisper...")
+        stt_device, stt_warm_seconds = stt.warmup()
+        print(f"[STT] Whisper pronto su {stt_device} · warm-up {stt_warm_seconds:.2f}s")
+    except Exception as exc:
+        print(f"[STT] Warm-up non riuscito: {exc}. Verra' ritentato al primo comando.")
+
     busy = threading.Event()
     agent = get_orchestrator()
 
@@ -112,10 +113,12 @@ def main() -> None:
         import numpy as np
 
         agent.set_state(JarvisState.LISTENING)
+        capture_started = time.monotonic()
         audio = stt.record_until_silence(
             initial_silence_seconds=initial_silence_seconds,
             max_seconds=max_seconds,
         )
+        capture_seconds = time.monotonic() - capture_started
 
         combined = audio
         if activation_audio is not None and getattr(activation_audio, "size", 0):
@@ -134,7 +137,8 @@ def main() -> None:
             f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
             f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
             f"speech={'si' if stt.last_recording_heard_speech else 'no'} "
-            f"gain={stt.last_recording_gain:.1f}x · {stt_seconds:.2f}s"
+            f"gain={stt.last_recording_gain:.1f}x · "
+            f"capture={capture_seconds:.2f}s · decode={stt_seconds:.2f}s"
         )
         return text
 
@@ -173,22 +177,15 @@ def main() -> None:
             return
         busy.set()
 
-        # Keep the wake stream alive for a very short post-roll. The callback is
-        # triggered while the user is often still saying "Jarvis, come stai?".
-        # Pausing immediately used to throw away the words after Jarvis. 450 ms
-        # captures the start of the command without making the acknowledgement
-        # feel sluggish when the user says only the wake word.
+        # Keep the wake stream alive briefly so "Jarvis, come stai?" remains
+        # one continuous utterance instead of losing the words after Jarvis.
         time.sleep(0.45)
 
-        ambient_audio = None
         activation_audio = None
         try:
             activation_audio = wake.recent_audio(1.8, exclude_tail_seconds=0.0)
-            if settings.presence_enabled:
-                ambient_audio = wake.recent_audio(min(settings.presence_context_seconds, 8.0))
         except Exception:
             activation_audio = None
-            ambient_audio = None
 
         if wake.selected_device is not None:
             stt.input_device = wake.selected_device
@@ -197,15 +194,12 @@ def main() -> None:
         try:
             print("[JARVIS] Ti ascolto...")
             text = capture_turn(
-                initial_silence_seconds=1.4,
-                max_seconds=settings.listener_max_utterance_seconds,
+                initial_silence_seconds=1.1,
+                max_seconds=min(settings.listener_max_utterance_seconds, 15.0),
                 activation_audio=activation_audio,
                 strip_wake=True,
             )
 
-            # If the buffered activation contained only the wake phrase, answer
-            # briefly and start a fresh turn. Common Whisper confusions of
-            # "Jarvis" are stripped by _WAKE_ALIASES as well.
             if not text:
                 if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
                     try:
@@ -214,8 +208,8 @@ def main() -> None:
                         print(f"[JARVIS] TTS prompt non disponibile: {exc}")
                 print("[JARVIS] In ascolto del comando...")
                 text = capture_turn(
-                    initial_silence_seconds=6.0,
-                    max_seconds=settings.listener_max_utterance_seconds,
+                    initial_silence_seconds=5.0,
+                    max_seconds=min(settings.listener_max_utterance_seconds, 20.0),
                 )
 
             if not text:
@@ -223,27 +217,17 @@ def main() -> None:
                 agent.set_state(JarvisState.IDLE)
                 return
 
-            if settings.presence_enabled and ambient_audio is not None:
-                try:
-                    if getattr(ambient_audio, "size", 0) >= int(16000 * 2.0):
-                        ambient_result = stt.transcribe(ambient_audio)
-                        ambient_text = _clean_ambient_transcript(ambient_result.text)
-                        if ambient_text:
-                            presence.add(ambient_text, speaker="contesto recente")
-                            print(f"[PRESENCE] {ambient_text}")
-                except Exception as exc:
-                    print(f"[PRESENCE] contesto non disponibile: {exc}")
-                finally:
-                    wake.clear_recent_audio()
-
-            ambient_context = presence.as_context() if settings.presence_enabled else ""
-            answer_turn(text, ambient_context=ambient_context)
+            # Presence now means explicit conversational context only. Ambient
+            # room audio is never transcribed automatically, avoiding invented
+            # snippets from background noise.
+            context = presence.as_context() if settings.presence_enabled else ""
+            answer_turn(text, ambient_context=context)
 
             while not stt.abort_event.is_set():
                 print("[JARVIS] Conversazione attiva · ascolto...")
                 followup = capture_turn(
                     initial_silence_seconds=settings.listener_followup_silence_seconds,
-                    max_seconds=settings.listener_max_utterance_seconds,
+                    max_seconds=min(settings.listener_max_utterance_seconds, 30.0),
                 )
                 if not stt.last_recording_heard_speech and not followup:
                     print("[JARVIS] Standby.")
@@ -261,7 +245,8 @@ def main() -> None:
                     print("[JARVIS] Standby richiesto.")
                     break
 
-                answer_turn(followup, ambient_context=presence.as_context() if settings.presence_enabled else "")
+                context = presence.as_context() if settings.presence_enabled else ""
+                answer_turn(followup, ambient_context=context)
         except Exception as exc:
             agent.set_state(JarvisState.ERROR)
             print(f"[JARVIS] Errore voce: {exc}")
@@ -285,9 +270,9 @@ def main() -> None:
     print(f"[JARVIS] Wake word: {settings.wake_model}")
     print(f"[JARVIS] Voice: {voice_name} · {'READY' if tts_ready else 'PENDING SAMPLE'}")
     if settings.presence_enabled:
-        print(f"[JARVIS] Presence context: {settings.presence_context_seconds:.0f}s (RAM only)")
+        print("[JARVIS] Conversation context: ON · ambient mic transcription: OFF")
     else:
-        print("[JARVIS] Presence context: OFF")
+        print("[JARVIS] Conversation context: OFF · ambient mic transcription: OFF")
     cognitive_label = "OpenJarvis + guarded local agent" if settings.openjarvis_enabled else "guarded local agent"
     print(f"[JARVIS] Hybrid cognitive engine: {cognitive_label}")
     print("[JARVIS] UI: http://127.0.0.1:8000")
