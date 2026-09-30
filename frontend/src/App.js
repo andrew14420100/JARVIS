@@ -3,13 +3,7 @@ import JarvisCore from './JarvisCore';
 
 const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 const WEBGL_PARTICLE_COUNT = 28000;
-
-function greetingForNow() {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'Buongiorno, signore. Come sta oggi?';
-  if (hour < 18) return 'Buon pomeriggio, signore. Come sta andando la giornata?';
-  return 'Buonasera, signore. È un piacere rivederla. Come sta?';
-}
+let sessionGreetingStarted = false;
 
 function Metric({ label, value }) {
   return (
@@ -21,22 +15,22 @@ function Metric({ label, value }) {
 }
 
 export default function App() {
-  const [mode, setMode] = useState('SPEAKING');
-  const [reply, setReply] = useState(() => greetingForNow());
-  const [hint, setHint] = useState('JARVIS è online. La conversazione è vocale.');
+  const [mode, setMode] = useState('INITIALIZING');
+  const [reply, setReply] = useState('');
+  const [hint, setHint] = useState('');
   const [online, setOnline] = useState('INITIALIZING');
   const [model, setModel] = useState('CLOUD CORE');
   const [clock, setClock] = useState('00:00:00');
   const [localVoiceActive, setLocalVoiceActive] = useState(false);
   const [localRuntimeState, setLocalRuntimeState] = useState('IDLE');
+  const [cloudVoiceLabel, setCloudVoiceLabel] = useState('VOICE FIRST');
   const [audioLevel] = useState(0);
   const [bootVisible, setBootVisible] = useState(true);
 
-  const visualStateRef = useRef('SPEAKING');
+  const visualStateRef = useRef('THINKING');
   const audioLevelRef = useRef(0);
   const audioBandsRef = useRef({ bass: 0, mid: 0, high: 0 });
   const runtimePauseUntilRef = useRef(0);
-  const greetingRef = useRef(reply);
 
   const particleCount = WEBGL_PARTICLE_COUNT.toLocaleString('it-IT');
 
@@ -52,7 +46,7 @@ export default function App() {
 
     runtimePauseUntilRef.current = Date.now() + 30000;
     setReply('');
-    setHint('Un momento, signore…');
+    setHint('');
     changeMode('THINKING');
 
     try {
@@ -64,7 +58,8 @@ export default function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Errore durante la richiesta');
 
-      const answer = String(data.reply || '').trim() || 'Sono qui, signore.';
+      const answer = String(data.reply || '').trim();
+      if (!answer) throw new Error('JARVIS non ha prodotto una risposta.');
       setReply(answer);
       if (data.model) setModel(String(data.model).slice(0, 48));
       changeMode('SPEAKING');
@@ -74,7 +69,7 @@ export default function App() {
     } catch (error) {
       const message = error?.message || 'Il cervello cloud non è disponibile.';
       setReply(message);
-      setHint('Non riesco a raggiungere il cervello AI in questo momento.');
+      setHint('');
       changeMode('ERROR');
       runtimePauseUntilRef.current = Date.now() + 4000;
     }
@@ -91,9 +86,6 @@ export default function App() {
     updateClock();
     const timer = setInterval(updateClock, 1000);
     const bootTimer = setTimeout(() => setBootVisible(false), 1550);
-    const greetTimer = setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('jarvis:greeting', { detail: { text: greetingRef.current } }));
-    }, 450);
 
     const health = async () => {
       try {
@@ -103,21 +95,59 @@ export default function App() {
         const active = data.active_model || data.models?.[0];
         const provider = data.provider ? `${data.provider} · ` : '';
         setModel(active ? `${provider}${active}`.slice(0, 48) : 'NO FREE MODEL');
+        if (data.cloud_tts?.enabled && data.cloud_tts?.provider === 'fish-audio-s2-pro-zero') {
+          setCloudVoiceLabel('FISH S2 PRO');
+        }
       } catch {
         setOnline('BACKEND OFFLINE');
         setModel('CLOUD CORE');
       }
     };
 
+    const beginNaturalSession = async () => {
+      if (sessionGreetingStarted) return;
+      sessionGreetingStarted = true;
+      runtimePauseUntilRef.current = Date.now() + 30000;
+      changeMode('THINKING');
+      setHint('');
+
+      try {
+        const now = new Date();
+        const response = await fetch(`${API_BASE}/api/session/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            local_time: now.toString(),
+            locale: navigator.language || 'it-IT',
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Impossibile avviare la sessione.');
+
+        const opening = String(data.reply || '').trim();
+        if (!opening) throw new Error('JARVIS non ha generato il saluto iniziale.');
+        setReply(opening);
+        if (data.model) setModel(String(data.model).slice(0, 48));
+        changeMode('SPEAKING');
+        window.dispatchEvent(new CustomEvent('jarvis:greeting', { detail: { text: opening } }));
+      } catch (error) {
+        console.warn('[JARVIS] Session start:', error);
+        setReply('');
+        setHint('JARVIS non riesce ad avviare la conversazione in questo momento.');
+        changeMode('ERROR');
+      }
+    };
+
     health();
     const healthTimer = setInterval(health, 12000);
+    const sessionTimer = setTimeout(beginNaturalSession, 1650);
     return () => {
       clearInterval(timer);
       clearInterval(healthTimer);
       clearTimeout(bootTimer);
-      clearTimeout(greetTimer);
+      clearTimeout(sessionTimer);
     };
-  }, []);
+  }, [changeMode]);
 
   useEffect(() => {
     let disposed = false;
@@ -142,9 +172,9 @@ export default function App() {
         } else if (next === 'LISTENING') {
           setHint('La ascolto, signore.');
         } else if (next === 'THINKING') {
-          setHint('Sto valutando la richiesta…');
+          setHint('');
         } else if (next === 'EXECUTING') {
-          setHint('Sto procedendo.');
+          setHint('');
         } else if (next === 'SPEAKING') {
           setHint('');
         } else if (next === 'IDLE') {
@@ -165,7 +195,7 @@ export default function App() {
 
   const voiceLink = localVoiceActive
     ? (localRuntimeState === 'IDLE' ? 'LOCAL READY' : localRuntimeState)
-    : 'VOICE FIRST';
+    : cloudVoiceLabel;
 
   return (
     <div className="jarvis-app">
