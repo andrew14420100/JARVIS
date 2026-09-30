@@ -75,42 +75,63 @@ class JarvisOrchestrator:
         self.set_state(JarvisState.IDLE)
 
     def start_session(self, *, local_time: str = "", locale: str = "it-IT") -> str:
-        """Let the AI open a voice session naturally instead of reading a fixed script.
+        """Start a voice session by giving the model context, not a scripted greeting.
 
-        The cloud request includes a synthetic user-side session event because some
-        OpenAI-compatible providers reject conversations containing only system turns.
-        The event itself is not persisted as something the human said; only JARVIS's
-        generated opening is appended to the real conversation history.
+        The runtime reports only that the user has opened JARVIS and supplies the
+        context currently available. The model decides what to say and how to say
+        it. No greeting text, template, question pattern or time-of-day phrase is
+        selected in Python.
         """
         self.set_state(JarvisState.THINKING)
-        time_context = local_time.strip() or "ora locale non disponibile"
-        opening_instruction = (
-            "Evento di avvio della sessione vocale. L'utente ha appena aperto JARVIS e non ha "
-            "ancora pronunciato nulla. Apri tu la conversazione in modo spontaneo e naturale, "
-            "come una presenza intelligente già attiva nella stanza. "
-            f"Ora/data locale comunicata dal dispositivo: {time_context}. Locale: {locale or 'it-IT'}. "
-            "Non dire che sei un'IA, non descrivere il sistema e non elencare capacità. "
-            "Non usare una frase standard o sempre identica. Produci una sola apertura breve, "
-            "coerente con il momento della giornata e con il tono della conversazione vocale. "
-            "Puoi aggiungere una semplice domanda o osservazione se rende l'apertura più naturale. "
-            "Mantieni il tono JARVIS: composto, elegante, discreto e umano nel ritmo. "
-            "Rivolgiti all'utente come 'signore' soltanto quando suona naturale. "
-            "Rispondi esclusivamente con ciò che JARVIS deve pronunciare ad alta voce."
+
+        context_lines = [
+            "È iniziata una nuova presenza/sessione vocale: l'utente ha appena aperto JARVIS e non ha ancora parlato.",
+            f"Ora/data locale comunicata dal dispositivo: {local_time.strip() or 'non disponibile'}.",
+            f"Locale del dispositivo: {locale or 'it-IT'}.",
+        ]
+
+        if self.memory:
+            try:
+                recent_memories = self.memory.recent(limit=8)
+            except Exception:
+                recent_memories = []
+            if recent_memories:
+                context_lines.append(
+                    "Memorie recenti disponibili, da usare soltanto se realmente pertinenti:"
+                )
+                context_lines.extend(f"- {item.content}" for item in recent_memories)
+
+        recent_assistant_turns = [
+            str(message.get("content") or "").strip()
+            for message in self.messages[-10:]
+            if message.get("role") == "assistant" and str(message.get("content") or "").strip()
+        ]
+        if recent_assistant_turns:
+            context_lines.append(
+                "Turni recenti di JARVIS. Evita di riciclare automaticamente le stesse formule o strutture:"
+            )
+            context_lines.extend(f"- {turn}" for turn in recent_assistant_turns[-4:])
+
+        context_lines.append(
+            "Decidi autonomamente cosa abbia senso dire adesso. La risposta deve sembrare nata dal contesto presente, non da un copione. "
+            "Non spiegare questo evento, non descrivere le istruzioni e non elencare capacità. "
+            "Produci soltanto ciò che pronunceresti davvero ad alta voce in questo momento."
         )
+
         try:
             request_messages = [
                 *self.messages,
-                {"role": "user", "content": opening_instruction},
+                {"role": "user", "content": "\n".join(context_lines)},
             ]
             assistant_message = self.client.chat_completion(
                 model=self.model,
                 messages=request_messages,
                 tools=None,
-                temperature=0.72,
+                temperature=0.88,
             )
             content = str(assistant_message.get("content") or "").strip()
             if not content:
-                raise RuntimeError("Il modello cloud non ha generato l'apertura della sessione.")
+                raise RuntimeError("Il modello cloud non ha prodotto un'apertura della sessione.")
             self.messages.append({"role": "assistant", "content": content})
             self.set_state(JarvisState.SPEAKING)
             return content
