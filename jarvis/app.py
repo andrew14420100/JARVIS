@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -17,7 +17,8 @@ from jarvis.config.settings import get_settings
 from jarvis.core.state import JarvisState
 from jarvis.memory import LocalMemory
 from jarvis.tools.defaults import build_default_registry
-from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
+from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
+from jarvis.voice.cosyvoice_proxy import CosyVoiceProxyError
 from jarvis.voice.edge_cloud import EdgeCloudTTS, EdgeTTSError
 from jarvis.voice.fish_s2 import FishS2CloudTTS, FishS2Error
 
@@ -45,28 +46,40 @@ def _build_brain_client():
 client = _build_brain_client()
 registry = build_default_registry()
 orchestrator: JarvisOrchestrator | None = None
+
+# The default voice path is entirely local. Cloud TTS is kept only as an
+# explicitly selectable legacy mode and is never used while tts_mode is local.
+voice_mode = settings.tts_mode.strip().lower()
+cosyvoice_tts: CosyVoiceProxyTTS | None = None
 cloud_tts: FishS2CloudTTS | None = None
 edge_tts_fallback: EdgeCloudTTS | None = None
-if settings.cloud_tts_enabled and settings.cloud_tts_provider.strip().lower() == "fish-s2-pro":
-    cloud_tts = FishS2CloudTTS(
-        space_id=settings.fish_s2_space,
-        hf_token=settings.fish_s2_hf_token,
-        style_prompt=settings.fish_s2_style_prompt,
+
+if voice_mode == "cosyvoice-local" and settings.cosyvoice_enabled:
+    cosyvoice_tts = CosyVoiceProxyTTS(
+        base_url=settings.cosyvoice_service_url,
+        timeout_seconds=settings.request_timeout_seconds,
     )
-if settings.cloud_tts_enabled and settings.cloud_tts_fallback_enabled:
-    edge_tts_fallback = EdgeCloudTTS(
-        voice=settings.edge_tts_voice,
-        rate=settings.edge_tts_rate,
-        pitch=settings.edge_tts_pitch,
-        volume=settings.edge_tts_volume,
-    )
+elif voice_mode == "cloud" and settings.cloud_tts_enabled:
+    if settings.cloud_tts_provider.strip().lower() == "fish-s2-pro":
+        cloud_tts = FishS2CloudTTS(
+            space_id=settings.fish_s2_space,
+            hf_token=settings.fish_s2_hf_token,
+            style_prompt=settings.fish_s2_style_prompt,
+        )
+    if settings.cloud_tts_fallback_enabled:
+        edge_tts_fallback = EdgeCloudTTS(
+            voice=settings.edge_tts_voice,
+            rate=settings.edge_tts_rate,
+            pitch=settings.edge_tts_pitch,
+            volume=settings.edge_tts_volume,
+        )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LEGACY_WEB_DIR = Path(__file__).parent / "web"
 FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
 FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.9.0")
+app = FastAPI(title="JARVIS", version="0.10.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -89,7 +102,7 @@ class SessionStartRequest(BaseModel):
 
 
 class TTSRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=2000)
+    text: str = Field(min_length=1, max_length=4000)
 
 
 class ChatResponse(BaseModel):
@@ -127,8 +140,11 @@ def _brain_status() -> dict[str, object]:
     }
 
 
-def _cloud_tts_status() -> dict[str, object]:
-    primary = {"enabled": False, "provider": ""}
+def _voice_status() -> dict[str, object]:
+    if cosyvoice_tts is not None:
+        return cosyvoice_tts.status()
+
+    primary: dict[str, object] = {"enabled": False, "provider": ""}
     if cloud_tts is not None:
         primary = {"enabled": True, **cloud_tts.status()}
     fallback = edge_tts_fallback.status() if edge_tts_fallback is not None else None
@@ -143,6 +159,7 @@ def home() -> FileResponse:
 @app.get("/api/health")
 def health() -> dict[str, object]:
     status = _brain_status()
+    voice = _voice_status()
     try:
         models = client.list_models()
         status = _brain_status()
@@ -153,7 +170,9 @@ def health() -> dict[str, object]:
             "active_model": status.get("active_model") or (models[0] if models else ""),
             "models": models,
             "paid_fallback": bool(status.get("paid_fallback", False)),
-            "cloud_tts": _cloud_tts_status(),
+            "voice": voice,
+            # Backwards-compatible key consumed by older frontend builds.
+            "cloud_tts": voice,
             "tools": registry.names(),
         }
     except (CloudAIError, LMStudioError) as exc:
@@ -163,7 +182,8 @@ def health() -> dict[str, object]:
             "provider": status.get("active_provider") or "",
             "models": status.get("models") or [],
             "paid_fallback": False,
-            "cloud_tts": _cloud_tts_status(),
+            "voice": voice,
+            "cloud_tts": voice,
             "error": str(exc),
             "tools": registry.names(),
         }
@@ -173,12 +193,14 @@ def health() -> dict[str, object]:
 def runtime_state() -> dict[str, object]:
     agent = orchestrator
     pending = agent.pending_confirmation.name if agent and agent.pending_confirmation else None
+    voice = _voice_status()
     return {
         "state": agent.state.value if agent else "IDLE",
         "pending_confirmation": pending,
         "voice_enabled": settings.voice_enabled,
         "presence_enabled": settings.presence_enabled,
-        "cloud_tts": _cloud_tts_status(),
+        "voice": voice,
+        "cloud_tts": voice,
         "brain": _brain_status(),
         "reasoning": agent.reasoning_status() if agent else None,
     }
@@ -192,7 +214,7 @@ def capabilities() -> dict[str, object]:
         compute_type=settings.stt_compute_type,
         language=settings.stt_language,
     )
-    tts = LocalTTS(
+    legacy_tts = LocalTTS(
         voice=settings.tts_voice,
         speed=settings.tts_speed,
         lang_code=settings.tts_lang_code,
@@ -208,6 +230,7 @@ def capabilities() -> dict[str, object]:
         agent=settings.openjarvis_agent,
         model=settings.openjarvis_model or settings.model,
     )
+    selected_voice = _voice_status()
     return {
         "brain": _brain_status(),
         "voice_enabled": settings.voice_enabled,
@@ -215,9 +238,14 @@ def capabilities() -> dict[str, object]:
         "presence_context_seconds": settings.presence_context_seconds,
         "memory_enabled": settings.memory_enabled,
         "wake_word": settings.wake_model,
-        "cloud_tts": _cloud_tts_status(),
+        "voice": selected_voice,
+        "cloud_tts": selected_voice,
         "stt": {"available": stt.available(), "dependencies": stt.dependency_status(), "model": settings.stt_model},
-        "tts": {"available": tts.available(), "dependencies": tts.dependency_status(), "voice": settings.tts_voice},
+        "tts": selected_voice if cosyvoice_tts is not None else {
+            "available": legacy_tts.available(),
+            "dependencies": legacy_tts.dependency_status(),
+            "voice": settings.tts_voice,
+        },
         "wake": {"available": wake.available(), "dependencies": wake.dependency_status()},
         "openjarvis": {
             "enabled": settings.openjarvis_enabled,
@@ -313,8 +341,48 @@ def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.post("/api/tts/stream")
+def stream_tts(request: TTSRequest) -> StreamingResponse:
+    if cosyvoice_tts is None:
+        raise HTTPException(status_code=503, detail="CosyVoice locale non è selezionato.")
+
+    voice = cosyvoice_tts.status()
+    if not voice.get("ready"):
+        raise HTTPException(
+            status_code=503,
+            detail="CosyVoice locale non è ancora pronto oppure manca la voce di riferimento.",
+        )
+
+    sample_rate = int(voice.get("sample_rate") or cosyvoice_tts.sample_rate)
+    return StreamingResponse(
+        cosyvoice_tts.stream_pcm(request.text),
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-JARVIS-TTS-Provider": "cosyvoice3-local",
+            "X-Sample-Rate": str(sample_rate),
+            "X-Audio-Format": "pcm_s16le_mono",
+        },
+    )
+
+
 @app.post("/api/tts")
 def synthesize_tts(request: TTSRequest) -> Response:
+    if cosyvoice_tts is not None:
+        try:
+            audio = cosyvoice_tts.synthesize(request.text)
+            return Response(
+                content=audio.data,
+                media_type=audio.media_type,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-JARVIS-TTS-Provider": audio.provider,
+                },
+            )
+        except CosyVoiceProxyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # Legacy cloud path is used only when JARVIS_TTS_MODE=cloud is explicitly set.
     primary_error = ""
     if cloud_tts is not None:
         try:
@@ -343,12 +411,13 @@ def synthesize_tts(request: TTSRequest) -> Response:
                 },
             )
         except EdgeTTSError as exc:
-            detail = f"Fish S2: {primary_error or 'non disponibile'} | Edge TTS: {exc}"
+            detail = f"TTS cloud primario: {primary_error or 'non disponibile'} | fallback: {exc}"
             raise HTTPException(status_code=503, detail=detail) from exc
 
-    if primary_error:
-        raise HTTPException(status_code=503, detail=primary_error)
-    raise HTTPException(status_code=503, detail="Nessun motore vocale cloud è disponibile.")
+    raise HTTPException(
+        status_code=503,
+        detail="Il motore vocale locale non è pronto. Avvia CosyVoice 3 e configura la voce di riferimento.",
+    )
 
 
 @app.post("/api/reset")
