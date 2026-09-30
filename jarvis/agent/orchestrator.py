@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,13 +75,7 @@ class JarvisOrchestrator:
         self.set_state(JarvisState.IDLE)
 
     def start_session(self, *, local_time: str = "", locale: str = "it-IT") -> str:
-        """Start a voice session by giving the model context, not a scripted greeting.
-
-        The runtime reports only that the user has opened JARVIS and supplies the
-        context currently available. The model decides what to say and how to say
-        it. No greeting text, template, question pattern or time-of-day phrase is
-        selected in Python.
-        """
+        """Start a voice session by giving the model context, not a scripted greeting."""
         self.set_state(JarvisState.THINKING)
 
         context_lines = [
@@ -145,8 +139,9 @@ class JarvisOrchestrator:
         *,
         ambient_context: str = "",
         cognitive_context: str = "",
+        base_messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        copied = list(self.messages)
+        copied = list(self.messages if base_messages is None else base_messages)
         insert_at = max(1, len(copied) - 1)
 
         contexts: list[str] = []
@@ -234,6 +229,87 @@ class JarvisOrchestrator:
         )
         self.set_state(JarvisState.THINKING)
         return True, None
+
+    def process_message_stream(self, text: str, *, ambient_context: str = "") -> Iterator[str]:
+        """Stream ordinary conversation while preserving the guarded tool path.
+
+        If the turn needs tools, confirmation, OpenJarvis, or a client without
+        streaming support, it transparently falls back to the existing complete
+        response path and yields that response once.
+        """
+        if self.pending_confirmation is not None:
+            reply = self.process_message(text, ambient_context=ambient_context)
+            if reply:
+                yield reply
+            return
+
+        decision = self.reasoner.decide(text)
+        if decision.use_openjarvis:
+            reply = self.process_message(text, ambient_context=ambient_context)
+            if reply:
+                yield reply
+            return
+
+        candidate_messages = [*self.messages, {"role": "user", "content": text}]
+        request_messages = self._messages_with_context(
+            text,
+            ambient_context=ambient_context,
+            base_messages=candidate_messages,
+        )
+        can_stream = getattr(self.client, "can_stream_chat", None)
+        stream_method = getattr(self.client, "chat_completion_stream", None)
+        tools = self.registry.schemas()
+        if (
+            not callable(can_stream)
+            or not callable(stream_method)
+            or not can_stream(messages=request_messages, tools=tools)
+        ):
+            reply = self.process_message(text, ambient_context=ambient_context)
+            if reply:
+                yield reply
+            return
+
+        self.messages.append({"role": "user", "content": text})
+        self.set_state(JarvisState.THINKING)
+        self.last_reasoning = {
+            "used_openjarvis": False,
+            "score": decision.score,
+            "reasons": decision.reasons,
+            "agent": "",
+            "model": "",
+        }
+
+        chunks: list[str] = []
+        try:
+            for chunk in stream_method(
+                model=self.model,
+                messages=request_messages,
+                temperature=0.4,
+            ):
+                if not chunk:
+                    continue
+                chunks.append(chunk)
+                if len(chunks) == 1:
+                    self.set_state(JarvisState.SPEAKING)
+                yield chunk
+
+            content = "".join(chunks).strip()
+            if not content:
+                raise RuntimeError("Il modello non ha prodotto testo in streaming.")
+            self.messages.append({"role": "assistant", "content": content})
+            if self.memory:
+                try:
+                    self.memory.remember_if_requested(text)
+                except Exception:
+                    pass
+            self.set_state(JarvisState.SPEAKING)
+        except Exception:
+            if chunks:
+                partial = "".join(chunks).strip()
+                if partial:
+                    self.messages.append({"role": "assistant", "content": partial})
+            self.set_state(JarvisState.ERROR)
+            raise
 
     def process_message(self, text: str, *, ambient_context: str = "") -> str:
         confirmation_consumed, pending_response = self._handle_pending_confirmation(text)
