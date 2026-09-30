@@ -16,16 +16,18 @@ from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 def _clean_ambient_transcript(text: str) -> str:
     value = " ".join(text.strip().split())
-    # The tail around activation often contains the wake phrase itself; remove
-    # it from contextual prose so the primary command is not duplicated.
     value = re.sub(r"\b(?:hey\s+)?jarvis\b[,.!?;:]*", "", value, flags=re.I)
     return " ".join(value.split()).strip()
 
 
+def _strip_wake_phrase(text: str) -> str:
+    value = " ".join(text.strip().split())
+    value = re.sub(r"^\s*(?:hey\s+)?jarvis\b[,.!?;:\-]*\s*", "", value, count=1, flags=re.I)
+    return value.strip()
+
+
 def main() -> None:
     settings = get_settings()
-    # Running this entrypoint explicitly means the local voice/presence runtime
-    # is active, even if cloud/web-only previews keep those features disabled.
     settings.voice_enabled = True
     settings.presence_enabled = True
 
@@ -61,9 +63,6 @@ def main() -> None:
         max_chars=settings.presence_max_chars,
     )
 
-    # STT and wake word are required for the desktop voice loop. TTS is allowed
-    # to be pending so development can continue before the private voice sample
-    # is supplied; JARVIS will simply remain silent until CosyVoice is ready.
     missing: list[str] = []
     for name, service in (("STT", stt), ("Wake word", wake)):
         if not service.available():
@@ -89,41 +88,112 @@ def main() -> None:
         agent.set_state(JarvisState.IDLE)
         busy.clear()
 
+    def capture_turn(
+        *,
+        initial_silence_seconds: float,
+        max_seconds: float,
+        activation_audio=None,
+        strip_wake: bool = False,
+    ) -> str:
+        import numpy as np
+
+        agent.set_state(JarvisState.LISTENING)
+        audio = stt.record_until_silence(
+            initial_silence_seconds=initial_silence_seconds,
+            max_seconds=max_seconds,
+        )
+        print(
+            f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
+            f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
+            f"speech={'si' if stt.last_recording_heard_speech else 'no'}"
+        )
+
+        combined = audio
+        if activation_audio is not None and getattr(activation_audio, "size", 0):
+            combined = np.concatenate(
+                (activation_audio.astype(np.float32, copy=False), audio.astype(np.float32, copy=False))
+            )
+
+        # Even when the RMS gate says "no", let Whisper inspect the short audio
+        # buffer: its own VAD is better at recovering quiet speech.
+        result = stt.transcribe(combined)
+        text = result.text.strip()
+        if strip_wake:
+            text = _strip_wake_phrase(text)
+        return text
+
+    def answer_turn(text: str, ambient_context: str = "") -> str:
+        print(f"TU: {text}")
+        reply = agent.process_message(text, ambient_context=ambient_context)
+        presence.add(text, speaker="utente")
+        if reply:
+            presence.add(reply, speaker="Jarvis")
+        print(f"JARVIS: {reply}")
+
+        reasoning = agent.reasoning_status()
+        if reasoning.get("used_openjarvis"):
+            print(
+                "[COGNITIVE] OpenJarvis "
+                f"agent={reasoning.get('agent')} model={reasoning.get('model')} "
+                f"score={reasoning.get('score')}"
+            )
+
+        if settings.tts_enabled and tts_ready and reply:
+            try:
+                agent.set_state(JarvisState.SPEAKING)
+                tts.speak(reply, streamed=True)
+            except Exception as exc:
+                print(f"[JARVIS] TTS non disponibile: {exc}")
+        return reply
+
     def handle_wake() -> None:
         if busy.is_set():
             interrupt()
             return
         busy.set()
 
-        # Snapshot the conversation *before* pausing the wake microphone. The
-        # snapshot is float audio held only in process memory.
         ambient_audio = None
-        if settings.presence_enabled:
-            try:
-                ambient_audio = wake.recent_audio(settings.presence_context_seconds)
-            except Exception:
-                ambient_audio = None
+        activation_audio = None
+        try:
+            # Keep the wake tail so a single natural sentence such as
+            # "Jarvis, apri Chrome" is not split and partially lost.
+            activation_audio = wake.recent_audio(2.5, exclude_tail_seconds=0.0)
+            if settings.presence_enabled:
+                ambient_audio = wake.recent_audio(min(settings.presence_context_seconds, 8.0))
+        except Exception:
+            activation_audio = None
+            ambient_audio = None
 
         wake.pause()
         try:
-            agent.set_state(JarvisState.LISTENING)
-            if settings.tts_enabled and tts_ready:
-                try:
-                    tts.speak("Sì?", streamed=True)
-                except Exception as exc:
-                    print(f"[JARVIS] TTS prompt non disponibile: {exc}")
-
             print("[JARVIS] Ti ascolto...")
-            audio = stt.record_until_silence()
-            result = stt.transcribe(audio)
-            text = result.text.strip()
+            text = capture_turn(
+                initial_silence_seconds=0.9,
+                max_seconds=settings.listener_max_utterance_seconds,
+                activation_audio=activation_audio,
+                strip_wake=True,
+            )
+
+            # If the user only said the wake word, acknowledge naturally and
+            # then wait for the actual request. If they continued immediately,
+            # no acknowledgement interrupts their sentence.
+            if not text:
+                if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
+                    try:
+                        tts.speak("Sì?", streamed=True)
+                    except Exception as exc:
+                        print(f"[JARVIS] TTS prompt non disponibile: {exc}")
+                print("[JARVIS] In ascolto del comando...")
+                text = capture_turn(
+                    initial_silence_seconds=6.0,
+                    max_seconds=settings.listener_max_utterance_seconds,
+                )
+
             if not text:
                 print("[JARVIS] Nessun comando rilevato.")
                 agent.set_state(JarvisState.IDLE)
                 return
 
-            # Transcribe recent room context only when Jarvis was actually
-            # invoked. This avoids running Whisper continuously in background.
             if settings.presence_enabled and ambient_audio is not None:
                 try:
                     if getattr(ambient_audio, "size", 0) >= int(16000 * 2.0):
@@ -138,29 +208,33 @@ def main() -> None:
                     wake.clear_recent_audio()
 
             ambient_context = presence.as_context() if settings.presence_enabled else ""
-            print(f"TU: {text}")
-            reply = agent.process_message(text, ambient_context=ambient_context)
-            presence.add(text, speaker="utente")
-            if reply:
-                presence.add(reply, speaker="Jarvis")
+            answer_turn(text, ambient_context=ambient_context)
 
-            print(f"JARVIS: {reply}")
-            reasoning = agent.reasoning_status()
-            if reasoning.get("used_openjarvis"):
-                print(
-                    "[COGNITIVE] OpenJarvis "
-                    f"agent={reasoning.get('agent')} model={reasoning.get('model')} "
-                    f"score={reasoning.get('score')}"
+            # Keep the same voice session alive after the first answer. The user
+            # can continue speaking naturally without saying Jarvis again.
+            while not stt.abort_event.is_set():
+                print("[JARVIS] Conversazione attiva · ascolto...")
+                followup = capture_turn(
+                    initial_silence_seconds=settings.listener_followup_silence_seconds,
+                    max_seconds=settings.listener_max_utterance_seconds,
                 )
+                if not stt.last_recording_heard_speech and not followup:
+                    print("[JARVIS] Standby.")
+                    break
+                if not followup:
+                    continue
 
-            if settings.tts_enabled and tts_ready and reply:
-                try:
-                    agent.set_state(JarvisState.SPEAKING)
-                    # CosyVoice streams PCM chunks as soon as they are generated,
-                    # so playback begins before the full waveform exists.
-                    tts.speak(reply, streamed=True)
-                except Exception as exc:
-                    print(f"[JARVIS] TTS non disponibile: {exc}")
+                normalized = followup.casefold().strip(" .,!?:;")
+                stop_phrases = {
+                    item.casefold().strip(" .,!?:;")
+                    for item in settings.listener_stop_phrases.split("|")
+                    if item.strip()
+                }
+                if normalized in stop_phrases:
+                    print("[JARVIS] Standby richiesto.")
+                    break
+
+                answer_turn(followup, ambient_context=presence.as_context())
         except Exception as exc:
             agent.set_state(JarvisState.ERROR)
             print(f"[JARVIS] Errore voce: {exc}")
