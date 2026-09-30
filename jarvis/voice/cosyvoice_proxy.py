@@ -26,9 +26,9 @@ class CosyVoiceAudio:
 class CosyVoiceProxyTTS:
     """Client for the warm CosyVoice 3 service running beside JARVIS.
 
-    The voice starts from a short first phrase, then the remaining phrases are
-    synthesized ahead of playback. This keeps time-to-first-audio low while
-    preserving continuous, natural speech on longer answers.
+    It can consume either a complete reply or live text chunks from the brain.
+    Text is converted into natural phrases while it is still arriving, and
+    CosyVoice synthesizes the next phrase while the current audio is playing.
     """
 
     def __init__(
@@ -95,6 +95,7 @@ class CosyVoiceProxyTTS:
             "cloned_voice": True,
             "streaming": True,
             "buffered_playback": True,
+            "live_text_streaming": True,
             "service_url": self.base_url,
             "sample_rate": self._sample_rate,
         }
@@ -136,7 +137,6 @@ class CosyVoiceProxyTTS:
 
     @staticmethod
     def _clean_for_speech(text: str) -> str:
-        """Strip non-spoken markup, including accidental model tool syntax."""
         clean = str(text or "")
         clean = re.sub(r"<invoke\b[^>]*>.*?</invoke>", "", clean, flags=re.IGNORECASE | re.DOTALL)
         clean = re.sub(r"<tool_call\b[^>]*>.*?</tool_call>", "", clean, flags=re.IGNORECASE | re.DOTALL)
@@ -153,7 +153,6 @@ class CosyVoiceProxyTTS:
 
     @staticmethod
     def _speech_segments(text: str) -> list[str]:
-        """Split speech so the first phrase can be spoken almost immediately."""
         clean = " ".join(str(text or "").strip().split())
         if not clean:
             return []
@@ -163,9 +162,7 @@ class CosyVoiceProxyTTS:
             rough = [clean]
 
         segments: list[str] = []
-        for index, part in enumerate(rough):
-            # The first utterance is deliberately short. Later chunks may be a
-            # little longer because they are synthesized while audio is playing.
+        for part in rough:
             limit = 46 if not segments else 82
             while len(part) > limit:
                 cut = part.rfind(" ", 0, limit + 1)
@@ -179,8 +176,6 @@ class CosyVoiceProxyTTS:
             if part:
                 segments.append(part)
 
-        # Avoid tiny fragments that sound choppy. Merge them forward/backward
-        # while preserving a short first phrase whenever possible.
         merged: list[str] = []
         for segment in segments:
             if merged and len(segment) < 12 and len(merged[-1]) + len(segment) + 1 <= 82:
@@ -188,6 +183,64 @@ class CosyVoiceProxyTTS:
             else:
                 merged.append(segment)
         return merged
+
+    @classmethod
+    def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
+        buffer = ""
+        first_segment = True
+        for raw in chunks:
+            if raw is None:
+                continue
+            buffer += str(raw)
+
+            while buffer:
+                lowered = buffer.lower()
+                tool_open = None
+                tool_close = None
+                for opening, closing in (
+                    ("<invoke", "</invoke>"),
+                    ("<tool_call", "</tool_call>"),
+                    ("<parameter", "</parameter>"),
+                ):
+                    pos = lowered.find(opening)
+                    if pos >= 0 and (tool_open is None or pos < tool_open):
+                        tool_open = pos
+                        tool_close = lowered.find(closing, pos)
+                if tool_open is not None and tool_close is None:
+                    break
+
+                limit = 46 if first_segment else 82
+                boundary: int | None = None
+
+                strong = re.search(r"[.!?](?:\s+|$)", buffer)
+                if strong:
+                    boundary = strong.end()
+                else:
+                    soft = re.search(r"[;:,]\s+", buffer)
+                    if soft and soft.end() >= 18:
+                        boundary = soft.end()
+
+                if boundary is None and len(buffer) > limit:
+                    cut = buffer.rfind(" ", 0, limit + 1)
+                    if cut < max(18, limit // 2):
+                        if len(buffer) < limit + 18:
+                            break
+                        cut = limit
+                    boundary = cut
+
+                if boundary is None:
+                    break
+
+                piece = buffer[:boundary].strip()
+                buffer = buffer[boundary:].lstrip()
+                clean = cls._clean_for_speech(piece)
+                if clean:
+                    first_segment = False
+                    yield clean
+
+        clean = cls._clean_for_speech(buffer)
+        if clean:
+            yield clean
 
     def stream_pcm(self, text: str) -> Iterator[bytes]:
         clean = self._clean_for_speech(text)
@@ -218,8 +271,7 @@ class CosyVoiceProxyTTS:
 
     def synthesize(self, text: str) -> CosyVoiceAudio:
         self._interrupt.clear()
-        clean = self._clean_for_speech(text)
-        pcm = b"".join(self.stream_pcm(clean))
+        pcm = b"".join(self.stream_pcm(text))
         if not pcm:
             raise CosyVoiceProxyError("CosyVoice non ha restituito audio.")
         if len(pcm) % 2:
@@ -233,13 +285,7 @@ class CosyVoiceProxyTTS:
             wav_file.writeframes(pcm)
         return CosyVoiceAudio(buffer.getvalue())
 
-    def speak(self, text: str, streamed: bool = True) -> None:
-        del streamed
-        clean = self._clean_for_speech(text)
-        segments = self._speech_segments(clean)
-        if not segments:
-            return
-
+    def _play_segments(self, segments: Iterator[str], *, live: bool) -> None:
         import sounddevice as sd
 
         self._interrupt.clear()
@@ -247,6 +293,7 @@ class CosyVoiceProxyTTS:
         stream = None
         producer: threading.Thread | None = None
         audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=32)
+        segment_counter = [0]
 
         def queue_item(item: bytes | Exception | None) -> bool:
             while not self._interrupt.is_set():
@@ -263,7 +310,11 @@ class CosyVoiceProxyTTS:
                 for segment in segments:
                     if self._interrupt.is_set():
                         break
-                    for chunk in self.stream_pcm(segment):
+                    clean = self._clean_for_speech(segment)
+                    if not clean:
+                        continue
+                    segment_counter[0] += 1
+                    for chunk in self.stream_pcm(clean):
                         if self._interrupt.is_set():
                             break
                         data = carry + chunk
@@ -287,7 +338,7 @@ class CosyVoiceProxyTTS:
             producer = threading.Thread(
                 target=produce_audio,
                 daemon=True,
-                name="jarvis-tts-stream",
+                name="jarvis-tts-live-stream" if live else "jarvis-tts-stream",
             )
             producer.start()
 
@@ -321,10 +372,11 @@ class CosyVoiceProxyTTS:
             stream.start()
             first_audio_seconds = time.monotonic() - started
             buffered_seconds = len(prebuffer) / float(max(1, self._sample_rate * 2))
+            mode = "brain→tts-live" if live else "streaming"
             print(
                 f"[TTS] primo_audio={first_audio_seconds:.2f}s · "
                 f"prebuffer={buffered_seconds:.2f}s · "
-                f"frasi={len(segments)} · playback=streaming"
+                f"frasi_avviate={segment_counter[0]} · playback={mode}"
             )
             stream.write(bytes(prebuffer))
 
@@ -351,3 +403,14 @@ class CosyVoiceProxyTTS:
                     pass
             self._speaking.clear()
             self._interrupt.clear()
+
+    def speak_text_stream(self, chunks: Iterator[str]) -> None:
+        self._play_segments(self._segments_from_live_text(chunks), live=True)
+
+    def speak(self, text: str, streamed: bool = True) -> None:
+        del streamed
+        clean = self._clean_for_speech(text)
+        segments = self._speech_segments(clean)
+        if not segments:
+            return
+        self._play_segments(iter(segments), live=False)
