@@ -10,9 +10,35 @@ VOICE_DIR="${ROOT_DIR}/private/voices"
 SUPERVISOR_CONF="/etc/supervisor/conf.d/jarvis-cosyvoice.conf"
 
 mkdir -p "${COSY_ROOT}" "${COSY_ROOT}/models" "${VOICE_DIR}"
+chmod +x "${ROOT_DIR}/scripts/run-cosyvoice-emergent.sh"
 
 echo "[JARVIS] Emergent CosyVoice setup"
 echo "[JARVIS] Root: ${ROOT_DIR}"
+
+# Register the long-lived service first. It remains RUNNING while it waits for
+# GPU, model files or the private reference voice instead of disappearing from
+# Supervisor with 'no such process'.
+if command -v supervisorctl >/dev/null 2>&1 && [[ -d /etc/supervisor/conf.d ]] && [[ -w /etc/supervisor/conf.d ]]; then
+  cat > "${SUPERVISOR_CONF}" <<EOF
+[program:jarvis-cosyvoice]
+command=/bin/bash ${ROOT_DIR}/scripts/run-cosyvoice-emergent.sh
+directory=${ROOT_DIR}
+autostart=true
+autorestart=true
+startsecs=0
+startretries=999
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/var/log/jarvis-cosyvoice.log
+stderr_logfile=/var/log/jarvis-cosyvoice-error.log
+environment=PYTHONUNBUFFERED="1"
+EOF
+  echo "[JARVIS] Registro jarvis-cosyvoice in Supervisor..."
+  supervisorctl reread || true
+  supervisorctl update || true
+else
+  echo "[JARVIS] Supervisor non disponibile: il servizio dovrà essere avviato manualmente."
+fi
 
 GPU_AVAILABLE=0
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -25,8 +51,8 @@ fi
 
 if [[ "${GPU_AVAILABLE}" != "1" ]]; then
   echo "[JARVIS] ATTENZIONE: nessuna GPU NVIDIA visibile nel container Emergent."
-  echo "[JARVIS] Per la risposta vocale quasi istantanea serve una GPU disponibile."
-  echo "[JARVIS] Per forzare comunque l'installazione CPU: JARVIS_ALLOW_CPU_COSYVOICE=1 bash $0"
+  echo "[JARVIS] jarvis-cosyvoice è comunque registrato e resterà in WAITING_FOR_GPU."
+  echo "[JARVIS] Per forzare un test CPU: JARVIS_ALLOW_CPU_COSYVOICE=1 bash $0"
   if [[ "${JARVIS_ALLOW_CPU_COSYVOICE:-0}" != "1" ]]; then
     exit 20
   fi
@@ -54,7 +80,7 @@ PY
 
 PYTHON_BIN="$(choose_python || true)"
 if [[ -z "${PYTHON_BIN}" ]]; then
-  echo "[JARVIS] CosyVoice richiede un Python compatibile. Su Emergent serve Python 3.10 o 3.11."
+  echo "[JARVIS] CosyVoice richiede Python 3.10 o 3.11 su Emergent."
   exit 21
 fi
 
@@ -100,32 +126,11 @@ snapshot_download(
 print("[JARVIS] Modello pronto: ${MODEL_DIR}")
 PY
 
-chmod +x "${ROOT_DIR}/scripts/run-cosyvoice-emergent.sh"
-
-if command -v supervisorctl >/dev/null 2>&1 && [[ -d /etc/supervisor/conf.d ]] && [[ -w /etc/supervisor/conf.d ]]; then
-  cat > "${SUPERVISOR_CONF}" <<EOF
-[program:jarvis-cosyvoice]
-command=/bin/bash ${ROOT_DIR}/scripts/run-cosyvoice-emergent.sh
-directory=${ROOT_DIR}
-autostart=true
-autorestart=true
-startsecs=3
-startretries=999
-stopasgroup=true
-killasgroup=true
-stdout_logfile=/var/log/jarvis-cosyvoice.log
-stderr_logfile=/var/log/jarvis-cosyvoice-error.log
-environment=PYTHONUNBUFFERED="1"
-EOF
-  echo "[JARVIS] Registro jarvis-cosyvoice in Supervisor..."
-  supervisorctl reread || true
-  supervisorctl update || true
-else
-  echo "[JARVIS] Supervisor non disponibile: avvio manuale con scripts/run-cosyvoice-emergent.sh"
+if command -v supervisorctl >/dev/null 2>&1; then
+  supervisorctl restart jarvis-cosyvoice || true
 fi
 
 echo
 echo "[JARVIS] Setup completato."
 echo "[JARVIS] Campione voce atteso in: ${VOICE_DIR}/jarvis.wav"
 echo "[JARVIS] Trascrizione attesa in: ${VOICE_DIR}/jarvis.txt"
-echo "[JARVIS] Finché questi due file non esistono, il servizio resta in attesa senza andare in crash-loop."
