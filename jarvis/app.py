@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ from jarvis.core.state import JarvisState
 from jarvis.memory import LocalMemory
 from jarvis.tools.defaults import build_default_registry
 from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
+from jarvis.voice.fish_s2 import FishS2CloudTTS, FishS2Error
 
 settings = get_settings()
 
@@ -39,12 +40,20 @@ def _build_brain_client():
 client = _build_brain_client()
 registry = build_default_registry()
 orchestrator: JarvisOrchestrator | None = None
+cloud_tts: FishS2CloudTTS | None = None
+if settings.cloud_tts_enabled and settings.cloud_tts_provider.strip().lower() == "fish-s2-pro":
+    cloud_tts = FishS2CloudTTS(
+        space_id=settings.fish_s2_space,
+        hf_token=settings.fish_s2_hf_token,
+        style_prompt=settings.fish_s2_style_prompt,
+    )
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LEGACY_WEB_DIR = Path(__file__).parent / "web"
 FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
 FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.6.0")
+app = FastAPI(title="JARVIS", version="0.7.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,6 +68,15 @@ if FRONTEND_STATIC_DIR.is_dir():
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
+
+
+class SessionStartRequest(BaseModel):
+    local_time: str = Field(default="", max_length=128)
+    locale: str = Field(default="it-IT", max_length=32)
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
 
 
 class ChatResponse(BaseModel):
@@ -96,6 +114,12 @@ def _brain_status() -> dict[str, object]:
     }
 
 
+def _cloud_tts_status() -> dict[str, object]:
+    if cloud_tts is None:
+        return {"enabled": False, "provider": ""}
+    return {"enabled": True, **cloud_tts.status()}
+
+
 @app.get("/")
 def home() -> FileResponse:
     return FileResponse(_frontend_index())
@@ -114,6 +138,7 @@ def health() -> dict[str, object]:
             "active_model": status.get("active_model") or (models[0] if models else ""),
             "models": models,
             "paid_fallback": bool(status.get("paid_fallback", False)),
+            "cloud_tts": _cloud_tts_status(),
             "tools": registry.names(),
         }
     except (CloudAIError, LMStudioError) as exc:
@@ -123,6 +148,7 @@ def health() -> dict[str, object]:
             "provider": status.get("active_provider") or "",
             "models": status.get("models") or [],
             "paid_fallback": False,
+            "cloud_tts": _cloud_tts_status(),
             "error": str(exc),
             "tools": registry.names(),
         }
@@ -137,6 +163,7 @@ def runtime_state() -> dict[str, object]:
         "pending_confirmation": pending,
         "voice_enabled": settings.voice_enabled,
         "presence_enabled": settings.presence_enabled,
+        "cloud_tts": _cloud_tts_status(),
         "brain": _brain_status(),
         "reasoning": agent.reasoning_status() if agent else None,
     }
@@ -173,6 +200,7 @@ def capabilities() -> dict[str, object]:
         "presence_context_seconds": settings.presence_context_seconds,
         "memory_enabled": settings.memory_enabled,
         "wake_word": settings.wake_model,
+        "cloud_tts": _cloud_tts_status(),
         "stt": {"available": stt.available(), "dependencies": stt.dependency_status(), "model": settings.stt_model},
         "tts": {"available": tts.available(), "dependencies": tts.dependency_status(), "voice": settings.tts_voice},
         "wake": {"available": wake.available(), "dependencies": wake.dependency_status()},
@@ -233,6 +261,24 @@ def memory_delete(memory_id: int) -> dict[str, bool]:
     return {"ok": memory.forget(memory_id)}
 
 
+@app.post("/api/session/start", response_model=ChatResponse)
+def start_session(request: SessionStartRequest) -> ChatResponse:
+    try:
+        agent = get_orchestrator()
+        reply = agent.start_session(local_time=request.local_time, locale=request.locale)
+        active_status = _brain_status()
+        response = ChatResponse(
+            reply=reply,
+            state=agent.state.value,
+            model=str(active_status.get("active_model") or agent.model),
+            reasoning=agent.reasoning_status(),
+        )
+        agent.set_state(JarvisState.IDLE)
+        return response
+    except (CloudAIError, LMStudioError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     try:
@@ -246,11 +292,28 @@ def chat(request: ChatRequest) -> ChatResponse:
             model=str(active_status.get("active_model") or agent.model),
             reasoning=agent.reasoning_status(),
         )
-        # Typed chat has no backend TTS lifecycle, so return the visual state to
-        # the browser and then leave the shared runtime ready for voice wake-up.
+        # Browser TTS owns the speech lifecycle, so leave the shared runtime ready.
         agent.set_state(JarvisState.IDLE)
         return response
     except (CloudAIError, LMStudioError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/tts")
+def synthesize_tts(request: TTSRequest) -> Response:
+    if cloud_tts is None:
+        raise HTTPException(status_code=503, detail="Fish Audio S2 Pro non è abilitato.")
+    try:
+        audio = cloud_tts.synthesize(request.text)
+        return Response(
+            content=audio.data,
+            media_type=audio.media_type,
+            headers={
+                "Cache-Control": "no-store",
+                "X-JARVIS-TTS-Provider": audio.provider,
+            },
+        )
+    except FishS2Error as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
