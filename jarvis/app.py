@@ -33,8 +33,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# The local Windows runtime serves the exact React/WebGL UI used by Emergent.
-# The cloud preview can still run frontend/backend as separate services.
 if FRONTEND_STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=FRONTEND_STATIC_DIR), name="frontend-static")
 
@@ -75,6 +73,17 @@ def health() -> dict[str, object]:
         return {"ok": True, "lm_studio": True, "models": models, "tools": registry.names()}
     except LMStudioError as exc:
         return {"ok": False, "lm_studio": False, "error": str(exc), "tools": registry.names()}
+
+
+@app.get("/api/state")
+def runtime_state() -> dict[str, object]:
+    agent = orchestrator
+    pending = agent.pending_confirmation.name if agent and agent.pending_confirmation else None
+    return {
+        "state": agent.state.value if agent else "IDLE",
+        "pending_confirmation": pending,
+        "voice_enabled": settings.voice_enabled,
+    }
 
 
 @app.get("/api/capabilities")
@@ -156,7 +165,6 @@ def reset() -> dict[str, bool]:
 
 @app.get("/{path:path}", include_in_schema=False)
 def react_spa(path: str) -> FileResponse:
-    """Serve root-level React build assets and SPA routes on the local runtime."""
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API route not found")
 
