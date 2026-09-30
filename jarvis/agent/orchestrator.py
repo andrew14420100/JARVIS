@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from jarvis.brain.lmstudio import LMStudioClient
@@ -13,6 +14,12 @@ from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.security import ConfirmationRequiredError, ToolBlockedError
 
 StateCallback = Callable[[JarvisState], None]
+
+
+@dataclass(slots=True)
+class PendingConfirmation:
+    name: str
+    arguments: dict[str, Any]
 
 
 class JarvisOrchestrator:
@@ -29,6 +36,7 @@ class JarvisOrchestrator:
         self.on_state_changed = on_state_changed
         self.state = JarvisState.IDLE
         self.model = client.resolve_model(settings.model)
+        self.pending_confirmation: PendingConfirmation | None = None
         self.memory: LocalMemory | None = None
         if settings.memory_enabled:
             try:
@@ -48,6 +56,7 @@ class JarvisOrchestrator:
         self.messages = [
             {"role": "system", "content": build_system_prompt(self.settings.user_name)}
         ]
+        self.pending_confirmation = None
         self.set_state(JarvisState.IDLE)
 
     def _messages_with_memory(self, query: str) -> list[dict[str, Any]]:
@@ -69,8 +78,68 @@ class JarvisOrchestrator:
         copied.insert(insert_at, {"role": "system", "content": memory_context})
         return copied
 
-    def process_message(self, text: str) -> str:
+    @staticmethod
+    def _confirmation_intent(text: str) -> bool | None:
+        normalized = " ".join(text.lower().strip().split()).strip(" .!?,")
+        yes = {
+            "si", "sì", "confermo", "conferma", "vai", "procedi", "fallo",
+            "ok", "okay", "yes", "confirm", "proceed", "do it",
+        }
+        no = {
+            "no", "annulla", "annulla tutto", "non farlo", "lascia stare",
+            "cancel", "stop", "nope",
+        }
+        if normalized in yes:
+            return True
+        if normalized in no:
+            return False
+        return None
+
+    def _handle_pending_confirmation(self, text: str) -> str | None:
+        pending = self.pending_confirmation
+        if pending is None:
+            return None
+
+        intent = self._confirmation_intent(text)
+        if intent is None:
+            return (
+                f"È ancora in attesa di conferma l'azione '{pending.name}'. "
+                "Rispondi 'confermo' per eseguirla oppure 'annulla'."
+            )
+
         self.messages.append({"role": "user", "content": text})
+        if intent is False:
+            self.pending_confirmation = None
+            self.messages.append({"role": "system", "content": f"L'utente ha annullato l'azione {pending.name}."})
+            self.set_state(JarvisState.IDLE)
+            return "Operazione annullata."
+
+        self.set_state(JarvisState.EXECUTING)
+        try:
+            result = self.registry.execute(pending.name, pending.arguments, confirmed=True)
+        except Exception as exc:
+            result = {"success": False, "error": str(exc)}
+        self.pending_confirmation = None
+        self.messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"L'utente ha confermato l'azione {pending.name}. "
+                    f"Risultato reale dello strumento: {json.dumps(result, ensure_ascii=False)}"
+                ),
+            }
+        )
+        self.set_state(JarvisState.THINKING)
+        return None
+
+    def process_message(self, text: str) -> str:
+        pending_response = self._handle_pending_confirmation(text)
+        if pending_response is not None:
+            return pending_response
+
+        # If there was no pending confirmation, this is a normal new user turn.
+        if not self.messages or self.messages[-1].get("role") != "user" or self.messages[-1].get("content") != text:
+            self.messages.append({"role": "user", "content": text})
         self.set_state(JarvisState.THINKING)
 
         try:
@@ -94,6 +163,7 @@ class JarvisOrchestrator:
                     return content
 
                 self.set_state(JarvisState.EXECUTING)
+                confirmation_requested = False
                 for call in tool_calls:
                     function = call.get("function", {})
                     name = function.get("name", "")
@@ -102,6 +172,8 @@ class JarvisOrchestrator:
                         arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
                         result = self.registry.execute(name, arguments)
                     except ConfirmationRequiredError as exc:
+                        self.pending_confirmation = PendingConfirmation(name=name, arguments=arguments)
+                        confirmation_requested = True
                         result = {
                             "success": False,
                             "confirmation_required": True,
@@ -119,7 +191,18 @@ class JarvisOrchestrator:
                             "content": json.dumps(result, ensure_ascii=False),
                         }
                     )
+
                 self.set_state(JarvisState.THINKING)
+                if confirmation_requested:
+                    # Let the model explain what needs confirmation, but never execute it yet.
+                    assistant_message = self.client.chat_completion(
+                        model=self.model,
+                        messages=self._messages_with_memory(text),
+                        tools=self.registry.schemas(),
+                    )
+                    self.messages.append(assistant_message)
+                    self.set_state(JarvisState.IDLE)
+                    return assistant_message.get("content") or "Questa azione richiede la tua conferma esplicita."
 
             self.set_state(JarvisState.ERROR)
             return "Ho interrotto l'operazione perché ho raggiunto il limite massimo di passaggi dell'agente."
