@@ -181,13 +181,50 @@ def main() -> None:
     def answer_turn(text: str, ambient_context: str = "") -> str:
         print(f"TU: {text}")
         brain_started = time.monotonic()
-        reply = agent.process_message(text, ambient_context=ambient_context)
-        brain_seconds = time.monotonic() - brain_started
+        first_token_at = None
+        brain_done_at = None
+        collected: list[str] = []
+
+        def brain_chunks():
+            nonlocal first_token_at, brain_done_at
+            stream_method = getattr(agent, "process_message_stream", None)
+            if callable(stream_method):
+                iterator = stream_method(text, ambient_context=ambient_context)
+            else:
+                iterator = iter([agent.process_message(text, ambient_context=ambient_context)])
+            for chunk in iterator:
+                if not chunk:
+                    continue
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                collected.append(chunk)
+                yield chunk
+            brain_done_at = time.monotonic()
+
+        tts_spoken = False
+        if settings.tts_enabled and tts_ready and hasattr(tts, "speak_text_stream"):
+            try:
+                tts_started = time.monotonic()
+                tts.speak_text_stream(brain_chunks())
+                tts_spoken = True
+                print(f"[LATENCY] turno_voce_totale={time.monotonic() - tts_started:.2f}s")
+            except Exception as exc:
+                print(f"[JARVIS] TTS live non disponibile: {exc}")
+        else:
+            for _ in brain_chunks():
+                pass
+
+        reply = "".join(collected).strip()
+        if brain_done_at is None:
+            brain_done_at = time.monotonic()
+
         presence.add(text, speaker="utente")
         if reply:
             presence.add(reply, speaker="Jarvis")
         print(f"JARVIS: {reply}")
-        print(f"[LATENCY] cervello={brain_seconds:.2f}s")
+        if first_token_at is not None:
+            print(f"[LATENCY] cervello_primo_token={first_token_at - brain_started:.2f}s")
+        print(f"[LATENCY] cervello_completo={brain_done_at - brain_started:.2f}s")
 
         reasoning = agent.reasoning_status()
         if reasoning.get("used_openjarvis"):
@@ -197,15 +234,18 @@ def main() -> None:
                 f"score={reasoning.get('score')}"
             )
 
-        if settings.tts_enabled and tts_ready and reply:
+        if settings.tts_enabled and tts_ready and reply and not tts_spoken and not hasattr(tts, "speak_text_stream"):
             try:
                 agent.set_state(JarvisState.SPEAKING)
                 tts_started = time.monotonic()
                 tts.speak(reply, streamed=True)
                 print(f"[LATENCY] voce_totale={time.monotonic() - tts_started:.2f}s")
-                acoustic_guard()
+                tts_spoken = True
             except Exception as exc:
                 print(f"[JARVIS] TTS non disponibile: {exc}")
+
+        if tts_spoken:
+            acoustic_guard()
         return reply
 
     def handle_wake() -> None:
@@ -214,8 +254,6 @@ def main() -> None:
             return
         busy.set()
 
-        # Capture just enough post-wake audio to distinguish "Jarvis" from
-        # "Jarvis, <command>" without adding a noticeable conversational pause.
         time.sleep(POST_WAKE_CAPTURE_DELAY_SECONDS)
 
         post_wake_audio = None
