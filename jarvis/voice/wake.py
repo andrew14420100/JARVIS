@@ -14,9 +14,13 @@ class WakeWordListener:
     is important on Windows devices that do not reliably deliver audio to two
     simultaneous input streams.
 
-    The listener also keeps a short in-memory ring buffer of recent PCM audio.
-    This makes it possible to reconstruct conversational context *before* the
-    wake phrase without persisting ambient audio to disk.
+    The listener keeps two in-memory buffers:
+    - recent ambient PCM used only for local runtime context/diagnostics;
+    - post-wake PCM that starts *after* the chunk that triggered openWakeWord.
+
+    The second buffer is deliberately separate so Whisper never has to decode
+    the wake phrase itself. This avoids the endless class of hallucinations such
+    as "Hey, Giardini", "Gervis" or other proper-name substitutions.
     """
 
     def __init__(
@@ -35,6 +39,7 @@ class WakeWordListener:
         self.context_seconds = max(2.0, context_seconds)
         self.input_device = input_device
         self.selected_device: int | None = None
+        self.last_wake_rms = 0.0
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._stream_released = threading.Event()
@@ -42,6 +47,9 @@ class WakeWordListener:
         self._audio_lock = threading.RLock()
         chunks = max(1, int((self.context_seconds * self.sample_rate) / self.chunk_size))
         self._recent_pcm: deque[Any] = deque(maxlen=chunks)
+        post_chunks = max(4, int((2.0 * self.sample_rate) / self.chunk_size))
+        self._post_wake_pcm: deque[Any] = deque(maxlen=post_chunks)
+        self._capture_post_wake = False
 
     @staticmethod
     def dependency_status() -> dict[str, bool]:
@@ -60,6 +68,8 @@ class WakeWordListener:
     def pause(self) -> None:
         self._pause.set()
         self._stream_released.wait(timeout=1.0)
+        with self._audio_lock:
+            self._capture_post_wake = False
 
     def resume(self) -> None:
         self._pause.clear()
@@ -72,6 +82,10 @@ class WakeWordListener:
         self._stop.clear()
         self._pause.clear()
         self._stream_released.set()
+        self.last_wake_rms = 0.0
+        with self._audio_lock:
+            self._post_wake_pcm.clear()
+            self._capture_post_wake = False
 
     def clear_recent_audio(self) -> None:
         with self._audio_lock:
@@ -98,6 +112,32 @@ class WakeWordListener:
         elif trim:
             return np.zeros(0, dtype=np.float32)
         return audio
+
+    def post_wake_audio(self, seconds: float = 0.8, *, exclude_head_seconds: float = 0.18):
+        """Return only audio captured after the wake-detection chunk.
+
+        The trigger chunk itself is never copied into this buffer. A small head
+        trim additionally removes any acoustic tail of the wake phrase. This is
+        the only activation audio that may be handed to Whisper.
+        """
+        import numpy as np
+
+        with self._audio_lock:
+            chunks = [chunk.copy() for chunk in self._post_wake_pcm]
+        if not chunks:
+            return np.zeros(0, dtype=np.float32)
+
+        audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+        trim = int(max(0.0, exclude_head_seconds) * self.sample_rate)
+        if trim >= audio.size:
+            return np.zeros(0, dtype=np.float32)
+        if trim:
+            audio = audio[trim:]
+
+        max_samples = int(max(0.0, seconds) * self.sample_rate)
+        if max_samples > 0 and audio.size > max_samples:
+            audio = audio[:max_samples]
+        return audio.astype(np.float32, copy=False)
 
     def _prediction_score(self, predictions: dict[str, Any]) -> tuple[str, float]:
         """Resolve openWakeWord's versioned prediction key safely."""
@@ -153,8 +193,7 @@ class WakeWordListener:
         """Return Windows input candidates in a useful order.
 
         Explicit configuration wins. Otherwise real microphone-looking devices
-        are tried before generic mapper/digital/loopback endpoints. This avoids
-        treating the 'mic' prefix inside 'Microsoft Sound Mapper' as a microphone.
+        are tried before generic mapper/digital/loopback endpoints.
         """
         devices = list(sd.query_devices())
         input_indexes = [
@@ -183,7 +222,6 @@ class WakeWordListener:
                     if wanted and wanted in str(devices[index].get("name", "")).casefold():
                         add(index)
 
-        # Prefer real microphones before Windows mapper/digital endpoints.
         for index in input_indexes:
             name = str(devices[index].get("name", ""))
             if self._looks_like_real_microphone(name):
@@ -197,7 +235,6 @@ class WakeWordListener:
         except Exception:
             pass
 
-        # Last resort: any remaining capture endpoint.
         for index in input_indexes:
             add(index)
         return ordered
@@ -294,6 +331,8 @@ class WakeWordListener:
                         pcm = np.frombuffer(data, dtype=np.int16).copy()
                         with self._audio_lock:
                             self._recent_pcm.append(pcm)
+                            if self._capture_post_wake:
+                                self._post_wake_pcm.append(pcm)
 
                         predictions = model.predict(pcm)
                         prediction_key, score = self._prediction_score(predictions)
@@ -337,6 +376,11 @@ class WakeWordListener:
                         if callback_lock.locked():
                             continue
                         cooldown_until = now + 1.5
+
+                        self.last_wake_rms = rms
+                        with self._audio_lock:
+                            self._post_wake_pcm.clear()
+                            self._capture_post_wake = True
 
                         def invoke() -> None:
                             with callback_lock:
