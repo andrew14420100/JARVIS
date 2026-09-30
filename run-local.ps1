@@ -43,7 +43,8 @@ try {
     Pop-Location
 }
 
-Write-Host "[6/6] Avvio JARVIS ibrido locale..."
-Write-Host "LM Studio deve essere aperto con il server su http://127.0.0.1:1234/v1"
-Write-Host "OpenJarvis verra usato per le richieste complesse; il core locale mantiene tool e conferme."
+Write-Host "[6/6] Avvio JARVIS..."
+Write-Host "Il cervello AI predefinito e' pubblico/cloud: non serve LM Studio."
+Write-Host "Configura almeno JARVIS_GROQ_API_KEY oppure JARVIS_OPENROUTER_API_KEY nel file .env."
+Write-Host "JARVIS usa soltanto route gratuite e non ha fallback a pagamento."
 & $python -m jarvis.desktop
