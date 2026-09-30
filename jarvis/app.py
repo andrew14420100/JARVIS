@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jarvis.agent.orchestrator import JarvisOrchestrator
+from jarvis.brain.cloud import CloudAIClient, CloudAIError
 from jarvis.brain.lmstudio import LMStudioClient, LMStudioError
 from jarvis.brain.openjarvis_adapter import OpenJarvisAdapter
 from jarvis.config.settings import get_settings
@@ -19,7 +20,23 @@ from jarvis.tools.defaults import build_default_registry
 from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
 
 settings = get_settings()
-client = LMStudioClient(settings.lm_studio_base_url, settings.request_timeout_seconds)
+
+
+def _build_brain_client():
+    if settings.brain_mode.strip().lower() == "cloud":
+        return CloudAIClient(
+            groq_api_key=settings.groq_api_key,
+            openrouter_api_key=settings.openrouter_api_key,
+            groq_model=settings.groq_model,
+            openrouter_model=settings.openrouter_model,
+            timeout_seconds=settings.request_timeout_seconds,
+            app_name=settings.cloud_app_name,
+            app_url=settings.cloud_app_url,
+        )
+    return LMStudioClient(settings.lm_studio_base_url, settings.request_timeout_seconds)
+
+
+client = _build_brain_client()
 registry = build_default_registry()
 orchestrator: JarvisOrchestrator | None = None
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,7 +44,7 @@ LEGACY_WEB_DIR = Path(__file__).parent / "web"
 FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
 FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.5.0")
+app = FastAPI(title="JARVIS", version="0.6.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -65,6 +82,20 @@ def _frontend_index() -> Path:
     return LEGACY_WEB_DIR / "index.html"
 
 
+def _brain_status() -> dict[str, object]:
+    status_method = getattr(client, "status", None)
+    if callable(status_method):
+        return dict(status_method())
+    return {
+        "mode": "local-lmstudio",
+        "configured": ["lmstudio"],
+        "models": [],
+        "active_provider": "lmstudio",
+        "active_model": "",
+        "paid_fallback": False,
+    }
+
+
 @app.get("/")
 def home() -> FileResponse:
     return FileResponse(_frontend_index())
@@ -72,11 +103,29 @@ def home() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, object]:
+    status = _brain_status()
     try:
         models = client.list_models()
-        return {"ok": True, "lm_studio": True, "models": models, "tools": registry.names()}
-    except LMStudioError as exc:
-        return {"ok": False, "lm_studio": False, "error": str(exc), "tools": registry.names()}
+        status = _brain_status()
+        return {
+            "ok": True,
+            "brain_mode": settings.brain_mode,
+            "provider": status.get("active_provider") or ((status.get("configured") or [""])[0]),
+            "active_model": status.get("active_model") or (models[0] if models else ""),
+            "models": models,
+            "paid_fallback": bool(status.get("paid_fallback", False)),
+            "tools": registry.names(),
+        }
+    except (CloudAIError, LMStudioError) as exc:
+        return {
+            "ok": False,
+            "brain_mode": settings.brain_mode,
+            "provider": status.get("active_provider") or "",
+            "models": status.get("models") or [],
+            "paid_fallback": False,
+            "error": str(exc),
+            "tools": registry.names(),
+        }
 
 
 @app.get("/api/state")
@@ -88,6 +137,7 @@ def runtime_state() -> dict[str, object]:
         "pending_confirmation": pending,
         "voice_enabled": settings.voice_enabled,
         "presence_enabled": settings.presence_enabled,
+        "brain": _brain_status(),
         "reasoning": agent.reasoning_status() if agent else None,
     }
 
@@ -117,6 +167,7 @@ def capabilities() -> dict[str, object]:
         model=settings.openjarvis_model or settings.model,
     )
     return {
+        "brain": _brain_status(),
         "voice_enabled": settings.voice_enabled,
         "presence_enabled": settings.presence_enabled,
         "presence_context_seconds": settings.presence_context_seconds,
@@ -152,10 +203,10 @@ def reasoning_status() -> dict[str, Any]:
 
 
 @app.get("/api/models")
-def models() -> dict[str, list[str]]:
+def models() -> dict[str, object]:
     try:
-        return {"models": client.list_models()}
-    except LMStudioError as exc:
+        return {"models": client.list_models(), "brain": _brain_status()}
+    except (CloudAIError, LMStudioError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -188,17 +239,18 @@ def chat(request: ChatRequest) -> ChatResponse:
         agent = get_orchestrator()
         reply = agent.process_message(request.message)
         response_state = agent.state.value
+        active_status = _brain_status()
         response = ChatResponse(
             reply=reply,
             state=response_state,
-            model=agent.model,
+            model=str(active_status.get("active_model") or agent.model),
             reasoning=agent.reasoning_status(),
         )
         # Typed chat has no backend TTS lifecycle, so return the visual state to
         # the browser and then leave the shared runtime ready for voice wake-up.
         agent.set_state(JarvisState.IDLE)
         return response
-    except LMStudioError as exc:
+    except (CloudAIError, LMStudioError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
