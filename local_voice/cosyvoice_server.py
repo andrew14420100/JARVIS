@@ -22,7 +22,7 @@ class TTSRequest(BaseModel):
 
 
 def build_app(cosyvoice, speaker_id: str, model_name: str, device: str) -> FastAPI:
-    app = FastAPI(title="JARVIS Emergent Voice", version="1.2")
+    app = FastAPI(title="JARVIS Emergent Voice", version="1.3")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
@@ -35,7 +35,7 @@ def build_app(cosyvoice, speaker_id: str, model_name: str, device: str) -> FastA
     def health():
         return {
             "ok": True,
-            "provider": "cosyvoice3-emergent",
+            "provider": "cosyvoice3-local",
             "model": model_name,
             "device": device,
             "sample_rate": int(cosyvoice.sample_rate),
@@ -53,9 +53,6 @@ def build_app(cosyvoice, speaker_id: str, model_name: str, device: str) -> FastA
 
         def generate():
             try:
-                # The reference voice is converted to a reusable speaker profile
-                # once at startup. Every subsequent phrase avoids re-encoding the
-                # WAV and starts yielding PCM as soon as CosyVoice has a chunk.
                 output = cosyvoice.inference_zero_shot(
                     clean,
                     "",
@@ -82,7 +79,7 @@ def build_app(cosyvoice, speaker_id: str, model_name: str, device: str) -> FastA
                 "Cache-Control": "no-store",
                 "X-Sample-Rate": str(int(cosyvoice.sample_rate)),
                 "X-Audio-Format": "pcm_s16le_mono",
-                "X-JARVIS-TTS-Provider": "cosyvoice3-emergent",
+                "X-JARVIS-TTS-Provider": "cosyvoice3-local",
                 "X-JARVIS-TTS-Device": device,
             },
         )
@@ -118,15 +115,19 @@ def main() -> None:
 
     import torch
     from cosyvoice.cli.cosyvoice import AutoModel
-    from cosyvoice.utils.file_utils import load_wav
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         try:
             device_name = torch.cuda.get_device_name(0)
+            capability = torch.cuda.get_device_capability(0)
+            print(
+                f"[COSYVOICE] Device: cuda · {device_name} · "
+                f"sm_{capability[0]}{capability[1]} · torch {torch.__version__}"
+            )
         except Exception:
             device_name = "CUDA"
-        print(f"[COSYVOICE] Device: cuda · {device_name}")
+            print(f"[COSYVOICE] Device: cuda · {device_name} · torch {torch.__version__}")
     else:
         print("[COSYVOICE] Device: CPU · latenza più elevata")
 
@@ -134,20 +135,18 @@ def main() -> None:
     if not prompt_transcript:
         raise SystemExit("La trascrizione della voce di riferimento è vuota.")
 
-    # CosyVoice 3 uses this prefix in the official zero-shot examples.
     prompt_text = f"You are a helpful assistant.<|endofprompt|>{prompt_transcript}"
-    prompt_speech_16k = load_wav(str(reference_audio), 16000)
 
     print("[COSYVOICE] Carico Fun-CosyVoice3-0.5B-2512...")
     cosyvoice = AutoModel(model_dir=str(model_dir))
 
     print("[COSYVOICE] Precalcolo il profilo della voce JARVIS...")
-    if not cosyvoice.add_zero_shot_spk(prompt_text, prompt_speech_16k, JARVIS_SPEAKER_ID):
+    # Current CosyVoice's add_zero_shot_spk API expects the reference WAV path.
+    # Passing a pre-loaded tensor makes frontend.load_wav() try to open the
+    # tensor as a filename and raises TypeError on current CosyVoice versions.
+    if not cosyvoice.add_zero_shot_spk(prompt_text, str(reference_audio), JARVIS_SPEAKER_ID):
         raise SystemExit("CosyVoice non è riuscito a registrare la voce di riferimento.")
 
-    # Warm the inference path once. This is intentionally done before the HTTP
-    # service becomes ready so the first real JARVIS sentence does not pay the
-    # lazy CUDA/kernel/model initialization cost.
     warm_started = time.perf_counter()
     try:
         for _ in cosyvoice.inference_zero_shot(
