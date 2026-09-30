@@ -180,12 +180,27 @@ def main() -> None:
     prompt_text = f"You are a helpful assistant.<|endofprompt|>{prompt_transcript}"
 
     print(f"[COSYVOICE] Carico Fun-CosyVoice3-0.5B · precisione {precision}...")
-    cosyvoice = AutoModel(
-        model_dir=str(model_dir),
-        load_trt=False,
-        load_vllm=False,
-        fp16=use_fp16,
-    )
+    try:
+        cosyvoice = AutoModel(
+            model_dir=str(model_dir),
+            load_trt=False,
+            fp16=use_fp16,
+        )
+    except Exception as exc:
+        if not use_fp16:
+            raise
+        print(
+            f"[COSYVOICE] FP16 non disponibile con questa build ({exc}). "
+            "Riprovo automaticamente in FP32.",
+            file=sys.stderr,
+        )
+        use_fp16 = False
+        precision = "fp32"
+        cosyvoice = AutoModel(
+            model_dir=str(model_dir),
+            load_trt=False,
+            fp16=False,
+        )
 
     print("[COSYVOICE] Precalcolo il profilo della voce JARVIS...")
     if not cosyvoice.add_zero_shot_spk(prompt_text, str(reference_audio), JARVIS_SPEAKER_ID):
