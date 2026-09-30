@@ -13,6 +13,9 @@ from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
+ACOUSTIC_GUARD_SECONDS = 0.28
+
+
 def _post_wake_speech_profile(audio, *, sample_rate: int = 16000) -> tuple[bool, float, float, float]:
     """Decide whether real speech continued after the wake word."""
     import numpy as np
@@ -104,6 +107,10 @@ def main() -> None:
     busy = threading.Event()
     agent = get_orchestrator()
 
+    def acoustic_guard() -> None:
+        """Let loudspeaker/reverb tail decay before reopening the microphone."""
+        time.sleep(ACOUSTIC_GUARD_SECONDS)
+
     def interrupt() -> None:
         stt.abort()
         if tts_ready:
@@ -155,8 +162,6 @@ def main() -> None:
             )
             return ""
 
-        # Recording is over: the UI must stop saying LISTENING while Whisper is
-        # decoding. This also makes it obvious whether a stall is capture or AI.
         agent.set_state(JarvisState.THINKING)
         print(f"[JARVIS] Voce rilevata · elaboro... · {diagnostic}")
 
@@ -198,6 +203,7 @@ def main() -> None:
                 tts_started = time.monotonic()
                 tts.speak(reply, streamed=True)
                 print(f"[LATENCY] voce_totale={time.monotonic() - tts_started:.2f}s")
+                acoustic_guard()
             except Exception as exc:
                 print(f"[JARVIS] TTS non disponibile: {exc}")
         return reply
@@ -247,6 +253,7 @@ def main() -> None:
                 if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
                     try:
                         tts.speak("Sì?", streamed=True)
+                        acoustic_guard()
                     except Exception as exc:
                         print(f"[JARVIS] TTS prompt non disponibile: {exc}")
                 print("[JARVIS] In ascolto del comando...")
