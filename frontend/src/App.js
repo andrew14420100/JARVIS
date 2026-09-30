@@ -14,6 +14,10 @@ function Metric({ label, value }) {
   );
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export default function App() {
   const [mode, setMode] = useState('INITIALIZING');
   const [reply, setReply] = useState('');
@@ -107,35 +111,45 @@ export default function App() {
     const beginNaturalSession = async () => {
       if (sessionGreetingStarted) return;
       sessionGreetingStarted = true;
-      runtimePauseUntilRef.current = Date.now() + 30000;
+      runtimePauseUntilRef.current = Date.now() + 45000;
       changeMode('THINKING');
       setHint('');
 
-      try {
-        const now = new Date();
-        const response = await fetch(`${API_BASE}/api/session/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            local_time: now.toString(),
-            locale: navigator.language || 'it-IT',
-          }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || 'Impossibile avviare la sessione.');
+      const now = new Date();
+      let lastError = null;
 
-        const opening = String(data.reply || '').trim();
-        if (!opening) throw new Error('JARVIS non ha generato il saluto iniziale.');
-        setReply(opening);
-        if (data.model) setModel(String(data.model).slice(0, 48));
-        changeMode('SPEAKING');
-        window.dispatchEvent(new CustomEvent('jarvis:greeting', { detail: { text: opening } }));
-      } catch (error) {
-        console.warn('[JARVIS] Session start:', error);
-        setReply('');
-        setHint('JARVIS non riesce ad avviare la conversazione in questo momento.');
-        changeMode('ERROR');
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const response = await fetch(`${API_BASE}/api/session/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              local_time: now.toString(),
+              locale: navigator.language || 'it-IT',
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || 'Impossibile avviare la sessione.');
+
+          const opening = String(data.reply || '').trim();
+          if (!opening) throw new Error('JARVIS non ha generato il saluto iniziale.');
+          setReply(opening);
+          if (data.model) setModel(String(data.model).slice(0, 48));
+          changeMode('SPEAKING');
+          window.dispatchEvent(new CustomEvent('jarvis:greeting', { detail: { text: opening } }));
+          return;
+        } catch (error) {
+          lastError = error;
+          console.warn(`[JARVIS] Session start attempt ${attempt}:`, error);
+          if (attempt < 3) await sleep(attempt * 1200);
+        }
       }
+
+      sessionGreetingStarted = false;
+      console.warn('[JARVIS] Session start failed:', lastError);
+      setReply('');
+      setHint('JARVIS non riesce ad avviare la conversazione in questo momento.');
+      changeMode('ERROR');
     };
 
     health();
