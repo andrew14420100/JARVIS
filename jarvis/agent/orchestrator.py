@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from jarvis.brain.hybrid import HybridReasoner
-from jarvis.brain.lmstudio import LMStudioClient
 from jarvis.config.settings import Settings
 from jarvis.core.prompts import build_system_prompt
 from jarvis.core.state import JarvisState
@@ -27,7 +26,7 @@ class JarvisOrchestrator:
     def __init__(
         self,
         settings: Settings,
-        client: LMStudioClient,
+        client: Any,
         registry: ToolRegistry,
         on_state_changed: StateCallback | None = None,
     ) -> None:
