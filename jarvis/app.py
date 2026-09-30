@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from jarvis.agent.orchestrator import JarvisOrchestrator
 from jarvis.brain.lmstudio import LMStudioClient, LMStudioError
+from jarvis.brain.openjarvis_adapter import OpenJarvisAdapter
 from jarvis.config.settings import get_settings
 from jarvis.core.state import JarvisState
 from jarvis.memory import LocalMemory
@@ -25,7 +27,7 @@ LEGACY_WEB_DIR = Path(__file__).parent / "web"
 FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
 FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.4.0")
+app = FastAPI(title="JARVIS", version="0.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,6 +48,7 @@ class ChatResponse(BaseModel):
     reply: str
     state: str
     model: str
+    reasoning: dict[str, Any] | None = None
 
 
 def get_orchestrator() -> JarvisOrchestrator:
@@ -84,6 +87,8 @@ def runtime_state() -> dict[str, object]:
         "state": agent.state.value if agent else "IDLE",
         "pending_confirmation": pending,
         "voice_enabled": settings.voice_enabled,
+        "presence_enabled": settings.presence_enabled,
+        "reasoning": agent.reasoning_status() if agent else None,
     }
 
 
@@ -104,16 +109,46 @@ def capabilities() -> dict[str, object]:
         model_name=settings.wake_model,
         threshold=settings.wake_threshold,
         chunk_size=settings.wake_chunk_size,
+        context_seconds=settings.presence_context_seconds,
+    )
+    openjarvis = OpenJarvisAdapter(
+        enabled=settings.openjarvis_enabled,
+        agent=settings.openjarvis_agent,
+        model=settings.openjarvis_model or settings.model,
     )
     return {
         "voice_enabled": settings.voice_enabled,
+        "presence_enabled": settings.presence_enabled,
+        "presence_context_seconds": settings.presence_context_seconds,
         "memory_enabled": settings.memory_enabled,
         "wake_word": settings.wake_model,
         "stt": {"available": stt.available(), "dependencies": stt.dependency_status(), "model": settings.stt_model},
         "tts": {"available": tts.available(), "dependencies": tts.dependency_status(), "voice": settings.tts_voice},
         "wake": {"available": wake.available(), "dependencies": wake.dependency_status()},
+        "openjarvis": {
+            "enabled": settings.openjarvis_enabled,
+            "available": openjarvis.available(),
+            "agent": settings.openjarvis_agent,
+            "error": openjarvis.error,
+        },
         "tools": registry.names(),
     }
+
+
+@app.get("/api/reasoning")
+def reasoning_status() -> dict[str, Any]:
+    if orchestrator is None:
+        return {
+            "used_openjarvis": False,
+            "score": 0,
+            "reasons": [],
+            "openjarvis": {
+                "enabled": settings.openjarvis_enabled,
+                "available": False,
+                "agent": settings.openjarvis_agent,
+            },
+        }
+    return orchestrator.reasoning_status()
 
 
 @app.get("/api/models")
@@ -153,7 +188,12 @@ def chat(request: ChatRequest) -> ChatResponse:
         agent = get_orchestrator()
         reply = agent.process_message(request.message)
         response_state = agent.state.value
-        response = ChatResponse(reply=reply, state=response_state, model=agent.model)
+        response = ChatResponse(
+            reply=reply,
+            state=response_state,
+            model=agent.model,
+            reasoning=agent.reasoning_status(),
+        )
         # Typed chat has no backend TTS lifecycle, so return the visual state to
         # the browser and then leave the shared runtime ready for voice wake-up.
         agent.set_state(JarvisState.IDLE)
