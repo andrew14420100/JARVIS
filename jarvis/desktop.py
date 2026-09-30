@@ -14,15 +14,24 @@ from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
+_WAKE_ALIASES = r"(?:hey\s+)?(?:jarvis|jervis|gervis|giarvis|jarviss|giannis)"
+
+
 def _clean_ambient_transcript(text: str) -> str:
     value = " ".join(text.strip().split())
-    value = re.sub(r"\b(?:hey\s+)?jarvis\b[,.!?;:]*", "", value, flags=re.I)
+    value = re.sub(rf"\b{_WAKE_ALIASES}\b[,.!?;:]*", "", value, flags=re.I)
     return " ".join(value.split()).strip()
 
 
 def _strip_wake_phrase(text: str) -> str:
     value = " ".join(text.strip().split())
-    value = re.sub(r"^\s*(?:hey\s+)?jarvis\b[,.!?;:\-]*\s*", "", value, count=1, flags=re.I)
+    value = re.sub(
+        rf"^\s*{_WAKE_ALIASES}\b[,.!?;:\-]*\s*",
+        "",
+        value,
+        count=1,
+        flags=re.I,
+    )
     return value.strip()
 
 
@@ -105,11 +114,6 @@ def main() -> None:
             initial_silence_seconds=initial_silence_seconds,
             max_seconds=max_seconds,
         )
-        print(
-            f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
-            f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
-            f"speech={'si' if stt.last_recording_heard_speech else 'no'}"
-        )
 
         combined = audio
         if activation_audio is not None and getattr(activation_audio, "size", 0):
@@ -121,6 +125,13 @@ def main() -> None:
         text = result.text.strip()
         if strip_wake:
             text = _strip_wake_phrase(text)
+
+        print(
+            f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
+            f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
+            f"speech={'si' if stt.last_recording_heard_speech else 'no'} "
+            f"gain={stt.last_recording_gain:.1f}x"
+        )
         return text
 
     def answer_turn(text: str, ambient_context: str = "") -> str:
@@ -163,9 +174,6 @@ def main() -> None:
             activation_audio = None
             ambient_audio = None
 
-        # The wake listener has already probed a working PortAudio endpoint.
-        # Reuse the exact numeric device for STT instead of asking Windows for a
-        # possibly different default after the wake stream closes.
         if wake.selected_device is not None:
             stt.input_device = wake.selected_device
 
@@ -173,12 +181,16 @@ def main() -> None:
         try:
             print("[JARVIS] Ti ascolto...")
             text = capture_turn(
-                initial_silence_seconds=0.9,
+                initial_silence_seconds=1.4,
                 max_seconds=settings.listener_max_utterance_seconds,
                 activation_audio=activation_audio,
                 strip_wake=True,
             )
 
+            # A transcript containing only the wake phrase (including common
+            # Whisper confusions such as "Hey Giannis") is intentionally empty
+            # after _strip_wake_phrase. In that case acknowledge and listen for
+            # the actual request instead of sending the wake phrase to the LLM.
             if not text:
                 if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
                     try:
