@@ -8,6 +8,7 @@ import uvicorn
 
 from jarvis.app import app, get_orchestrator
 from jarvis.config.settings import get_settings
+from jarvis.core.state import JarvisState
 from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
 
 
@@ -41,10 +42,12 @@ def main() -> None:
         )
 
     busy = threading.Event()
+    agent = get_orchestrator()
 
     def interrupt() -> None:
         stt.abort()
         tts.stop()
+        agent.set_state(JarvisState.IDLE)
         busy.clear()
 
     def handle_wake() -> None:
@@ -52,8 +55,9 @@ def main() -> None:
             interrupt()
             return
         busy.set()
+        wake.pause()
         try:
-            wake.pause()
+            agent.set_state(JarvisState.LISTENING)
             if settings.tts_enabled:
                 try:
                     tts.speak("Sì?", streamed=False)
@@ -66,21 +70,25 @@ def main() -> None:
             text = result.text.strip()
             if not text:
                 print("[JARVIS] Nessun comando rilevato.")
+                agent.set_state(JarvisState.IDLE)
                 return
 
             print(f"TU: {text}")
-            agent = get_orchestrator()
             reply = agent.process_message(text)
             print(f"JARVIS: {reply}")
             if settings.tts_enabled and reply:
                 try:
+                    agent.set_state(JarvisState.SPEAKING)
                     tts.speak(reply, streamed=True)
                 except Exception as exc:
                     print(f"[JARVIS] TTS non disponibile: {exc}")
         except Exception as exc:
+            agent.set_state(JarvisState.ERROR)
             print(f"[JARVIS] Errore voce: {exc}")
         finally:
             wake.resume()
+            if agent.state is not JarvisState.ERROR:
+                agent.set_state(JarvisState.IDLE)
             busy.clear()
 
     def serve_ui() -> None:
