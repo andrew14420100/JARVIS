@@ -19,7 +19,11 @@ class Settings(BaseSettings):
     user_name: str = "Signore"
 
     # Public cloud AI. Secrets stay server-side and are never sent to React.
-    # The OpenRouter route is intentionally constrained to free-only model ids.
+    # Z.AI is preferred when configured because GLM-4.7-Flash is currently
+    # listed by Z.AI at $0 input/$0 output. Only explicitly free model ids are
+    # accepted by the router.
+    zai_api_key: str = ""
+    zai_model: str = "glm-4.7-flash"
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"
     openrouter_api_key: str = ""
@@ -59,13 +63,19 @@ class Settings(BaseSettings):
     stt_compute_type: str = "int8"
     stt_language: str = "it"
 
-    # Browser/cloud voice preview. Fish Audio runs remotely on a public
-    # Hugging Face ZeroGPU Space, so no local GPU/model is required.
+    # Browser/cloud voice preview. Fish Audio S2 Pro remains the preferred
+    # natural voice. Edge Neural TTS is a no-key online fallback so JARVIS does
+    # not become silent when the public ZeroGPU Space is queued/unavailable.
     cloud_tts_enabled: bool = True
     cloud_tts_provider: str = "fish-s2-pro"
     fish_s2_space: str = "artificialguybr/fish-s2-pro-zero"
     fish_s2_hf_token: str = ""
     fish_s2_style_prompt: str = "[low voice] [calm professional tone]"
+    cloud_tts_fallback_enabled: bool = True
+    edge_tts_voice: str = "it-IT-GiuseppeMultilingualNeural"
+    edge_tts_rate: str = "-8%"
+    edge_tts_pitch: str = "-6Hz"
+    edge_tts_volume: str = "+0%"
 
     # Local desktop TTS remains available for the future native runtime.
     tts_enabled: bool = True
