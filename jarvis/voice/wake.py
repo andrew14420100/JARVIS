@@ -94,6 +94,40 @@ class WakeWordListener:
             return np.zeros(0, dtype=np.float32)
         return audio
 
+    def _prediction_score(self, predictions: dict[str, Any]) -> tuple[str, float]:
+        """Resolve openWakeWord's versioned prediction key safely.
+
+        The public model is configured as ``hey_jarvis`` but current releases
+        commonly expose predictions under a key such as ``hey_jarvis_v0.1``.
+        Looking up only the unversioned configuration name therefore returns
+        zero forever even while the model is hearing the wake phrase.
+        """
+        if not predictions:
+            return self.model_name, 0.0
+
+        wanted = self.model_name.lower().replace(".onnx", "").replace(".tflite", "")
+        matches: list[tuple[str, float]] = []
+        for key, value in predictions.items():
+            normalized = str(key).lower().replace(".onnx", "").replace(".tflite", "")
+            if wanted == normalized or wanted in normalized or normalized in wanted:
+                try:
+                    matches.append((str(key), float(value)))
+                except (TypeError, ValueError):
+                    continue
+
+        if not matches:
+            # If only one wake model is loaded, using its sole prediction is
+            # safer than silently reading 0.0 from a mismatched versioned key.
+            if len(predictions) == 1:
+                key, value = next(iter(predictions.items()))
+                try:
+                    return str(key), float(value)
+                except (TypeError, ValueError):
+                    return str(key), 0.0
+            return self.model_name, 0.0
+
+        return max(matches, key=lambda item: item[1])
+
     def run(
         self,
         callback: Callable[[], None],
@@ -108,6 +142,19 @@ class WakeWordListener:
         model = Model(wakeword_models=[self.model_name], inference_framework="onnx")
         cooldown_until = 0.0
         callback_lock = threading.Lock()
+        prediction_key_reported = False
+        last_candidate_log = 0.0
+
+        try:
+            default_input = sd.query_devices(kind="input")
+            if default_input:
+                print(
+                    "[JARVIS] Microfono: "
+                    f"{default_input.get('name', 'input predefinito')} · "
+                    f"{default_input.get('default_samplerate', self.sample_rate):.0f} Hz"
+                )
+        except Exception as exc:
+            print(f"[JARVIS] Microfono predefinito non identificato: {exc}")
 
         with sd.RawInputStream(
             samplerate=self.sample_rate,
@@ -128,14 +175,32 @@ class WakeWordListener:
                     self._recent_pcm.append(pcm)
 
                 predictions = model.predict(pcm)
-                score = float(predictions.get(self.model_name, 0.0))
+                prediction_key, score = self._prediction_score(predictions)
+
+                if not prediction_key_reported:
+                    print(
+                        f"[JARVIS] Wake detector: {prediction_key} · "
+                        f"soglia {self.threshold:.2f}"
+                    )
+                    prediction_key_reported = True
+
+                # A lightweight diagnostic only for meaningful candidates. It
+                # confirms that the microphone/model are hearing the user without
+                # flooding the console with every 80 ms frame.
+                now = time.monotonic()
+                diagnostic_floor = min(0.20, max(0.08, self.threshold * 0.35))
+                if score >= diagnostic_floor and now - last_candidate_log >= 0.6:
+                    print(f"[WAKE] {prediction_key} score={score:.3f}")
+                    last_candidate_log = now
+
                 if score < self.threshold:
                     continue
 
                 model.reset()
-                now = time.monotonic()
                 if now < cooldown_until:
                     continue
+
+                print(f"[JARVIS] Wake word rilevata · {prediction_key} score={score:.3f}")
 
                 if busy and busy():
                     cooldown_until = now + 2.0
