@@ -59,11 +59,9 @@ function emitVoiceInput(text) {
 function normalizeWakeTranscript(text) {
   const value = String(text || '').trim();
   if (!value) return { activated: false, command: '' };
-
   const pattern = /\b(?:hey\s+)?jarvis\b[\s,.:;!?-]*/i;
   const match = value.match(pattern);
   if (!match) return { activated: false, command: value };
-
   const index = match.index || 0;
   const command = `${value.slice(0, index)} ${value.slice(index + match[0].length)}`
     .replace(/\s+/g, ' ')
@@ -128,6 +126,14 @@ function stopAudio() {
   activeAudio = null;
   if (activeAudioUrl) URL.revokeObjectURL(activeAudioUrl);
   activeAudioUrl = '';
+
+  if ('speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      // Ignore browser speech cleanup errors.
+    }
+  }
 }
 
 function installOneTimeGesture(action) {
@@ -146,7 +152,6 @@ function installOneTimeGesture(action) {
 async function ensureMicrophoneStream() {
   if (micStream?.active) return true;
   if (!navigator.mediaDevices?.getUserMedia) return false;
-
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -168,7 +173,6 @@ function startMicMonitor() {
   if (!micStream?.active || micMonitorFrame) return;
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextCtor) return;
-
   try {
     micMonitorContext = micMonitorContext || new AudioContextCtor();
     const source = micMonitorContext.createMediaStreamSource(micStream);
@@ -182,14 +186,12 @@ function startMicMonitor() {
         micMonitorFrame = 0;
         return;
       }
-
       micAnalyser.getFloatTimeDomainData(samples);
       let sum = 0;
       for (let index = 0; index < samples.length; index += 1) {
         sum += samples[index] * samples[index];
       }
       const rms = Math.sqrt(sum / samples.length);
-
       if (
         speaking
         && Date.now() - speechStartedAt > BARGE_IN_GUARD_MS
@@ -204,10 +206,8 @@ function startMicMonitor() {
       } else {
         bargeInSince = 0;
       }
-
       micMonitorFrame = window.requestAnimationFrame(tick);
     };
-
     micMonitorFrame = window.requestAnimationFrame(tick);
   } catch (error) {
     console.warn('[JARVIS] Microphone monitor:', error);
@@ -240,10 +240,8 @@ function candidateTranscript() {
 function commitCurrentTurn() {
   pendingTurnTimer = null;
   if (submitted || speaking) return;
-
   let text = candidateTranscript();
   if (!text) return;
-
   const activeConversation = Date.now() < conversationDeadline;
   const parsed = normalizeWakeTranscript(text);
 
@@ -254,7 +252,6 @@ function commitCurrentTurn() {
       setHint('In standby. Dica “Jarvis”.');
       return;
     }
-
     conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
     if (!parsed.command) {
       resetTranscriptBuffers();
@@ -267,7 +264,6 @@ function commitCurrentTurn() {
 
   text = text.trim();
   if (!text) return;
-
   submitted = true;
   conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
   resetTranscriptBuffers();
@@ -283,7 +279,6 @@ function scheduleTurnCommit() {
 
 function startRecognition() {
   if (!RecognitionCtor || !voiceRuntimeStarted || recognitionRunning || speaking) return;
-
   submitted = false;
   resetTranscriptBuffers();
   recognition = new RecognitionCtor();
@@ -308,12 +303,10 @@ function startRecognition() {
 
   recognition.onresult = (event) => {
     let newestInterim = '';
-
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
       const text = String(result?.[0]?.transcript || '').trim();
       if (!text) continue;
-
       if (result.isFinal) {
         finalBuffer = `${finalBuffer} ${text}`.replace(/\s+/g, ' ').trim();
       } else {
@@ -324,7 +317,6 @@ function startRecognition() {
     interimBuffer = newestInterim;
     const heard = candidateTranscript();
     if (!heard || submitted) return;
-
     const activeConversation = Date.now() < conversationDeadline;
     const parsed = normalizeWakeTranscript(heard);
 
@@ -336,14 +328,12 @@ function startRecognition() {
       setVoiceState('listening', heard);
       setHint(`Ho sentito: ${heard}`);
     }
-
     scheduleTurnCommit();
   };
 
   recognition.onerror = (event) => {
     recognitionRunning = false;
     if (event.error === 'aborted') return;
-
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
       voiceRuntimeStarted = false;
       setVoiceState('blocked', event.error);
@@ -351,7 +341,6 @@ function startRecognition() {
       installOneTimeGesture(startVoiceRuntime);
       return;
     }
-
     if (event.error !== 'no-speech') {
       console.warn('[JARVIS] Speech recognition:', event.error);
       setVoiceState('recognition-error', event.error);
@@ -362,9 +351,6 @@ function startRecognition() {
     recognitionRunning = false;
     recognition = null;
     clearPendingTurn();
-
-    // Chrome may stop continuous recognition after an internal timeout. If it
-    // produced usable text immediately before ending, commit that text first.
     if (!submitted && !speaking && candidateTranscript()) {
       commitCurrentTurn();
       return;
@@ -388,7 +374,6 @@ async function startVoiceRuntime({ requestPermission = true } = {}) {
     setHint('Il riconoscimento vocale richiede Chrome o Edge aggiornato.');
     return;
   }
-
   let allowed = true;
   if (requestPermission || !micStream?.active) allowed = await ensureMicrophoneStream();
   if (!allowed) {
@@ -397,7 +382,6 @@ async function startVoiceRuntime({ requestPermission = true } = {}) {
     installOneTimeGesture(startVoiceRuntime);
     return;
   }
-
   voiceRuntimeStarted = true;
   startMicMonitor();
   setVoiceState('standby');
@@ -409,7 +393,6 @@ async function bootstrapVoiceRuntime() {
     setVoiceState('unsupported');
     return;
   }
-
   if (navigator.permissions?.query) {
     try {
       const status = await navigator.permissions.query({ name: 'microphone' });
@@ -426,7 +409,6 @@ async function bootstrapVoiceRuntime() {
       // Some browsers do not expose microphone through Permissions API.
     }
   }
-
   setVoiceState('permission-needed');
   setHint('Prima attivazione: tocchi una volta e consenta il microfono. Poi sarà automatico.');
   installOneTimeGesture(startVoiceRuntime);
@@ -464,7 +446,6 @@ async function playPcmStream(response) {
   const sampleRate = Number(response.headers.get('X-Sample-Rate')) || 24000;
   const reader = response.body?.getReader?.();
   if (!reader) throw new Error('Streaming audio non supportato.');
-
   let scheduledAt = ctx.currentTime + 0.025;
   let carry = new Uint8Array(0);
   let heardAnything = false;
@@ -476,7 +457,6 @@ async function playPcmStream(response) {
     const { value, done } = await reader.read();
     if (done || generation !== pcmGeneration) break;
     if (!value?.byteLength) continue;
-
     let bytes;
     if (carry.byteLength) {
       bytes = new Uint8Array(carry.byteLength + value.byteLength);
@@ -485,14 +465,11 @@ async function playPcmStream(response) {
     } else {
       bytes = value;
     }
-
     const usableLength = bytes.byteLength - (bytes.byteLength % 2);
     carry = usableLength < bytes.byteLength ? bytes.slice(usableLength) : new Uint8Array(0);
     if (!usableLength) continue;
-
     const floats = pcm16ToFloat32(bytes.subarray(0, usableLength));
     if (!floats.length) continue;
-
     const buffer = ctx.createBuffer(1, floats.length, sampleRate);
     buffer.copyToChannel(floats, 0);
     const source = ctx.createBufferSource();
@@ -500,7 +477,6 @@ async function playPcmStream(response) {
     source.connect(ctx.destination);
     pcmSources.add(source);
     source.onended = () => pcmSources.delete(source);
-
     const startAt = Math.max(scheduledAt, ctx.currentTime + 0.010);
     source.start(startAt);
     scheduledAt = startAt + buffer.duration;
@@ -511,7 +487,6 @@ async function playPcmStream(response) {
     if (generation === pcmGeneration) reopenConversation();
     return;
   }
-
   const remainingMs = Math.max(0, (scheduledAt - ctx.currentTime) * 1000) + 40;
   window.setTimeout(() => {
     if (generation === pcmGeneration) reopenConversation();
@@ -533,6 +508,46 @@ async function playGeneratedAudio(blob) {
   await activeAudio.play();
 }
 
+function selectBrowserVoice() {
+  if (!('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  const italian = voices.filter((voice) => String(voice.lang || '').toLowerCase().startsWith('it'));
+  const preferred = italian.find((voice) => /giuseppe|diego|cosimo|male|neural/i.test(voice.name));
+  return preferred || italian[0] || voices[0] || null;
+}
+
+async function speakBrowserFallback(text) {
+  if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) {
+    reopenConversation();
+    return;
+  }
+  stopAudio();
+  await new Promise((resolve) => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voice = selectBrowserVoice();
+    if (voice) utterance.voice = voice;
+    utterance.lang = voice?.lang || 'it-IT';
+    utterance.rate = 1.02;
+    utterance.pitch = 0.92;
+    utterance.volume = 1;
+    utterance.onstart = () => {
+      speaking = true;
+      speechStartedAt = Date.now();
+      setVoiceState('speaking');
+      setHint('');
+    };
+    utterance.onend = () => {
+      resolve();
+      reopenConversation();
+    };
+    utterance.onerror = () => {
+      resolve();
+      reopenConversation();
+    };
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
 async function fetchErrorDetail(response, fallback) {
   try {
     const payload = await response.json();
@@ -548,7 +563,6 @@ async function speak(text, { greeting = false } = {}) {
     reopenConversation();
     return;
   }
-
   stopRecognition();
   stopAudio();
   speaking = true;
@@ -564,24 +578,22 @@ async function speak(text, { greeting = false } = {}) {
       body: JSON.stringify({ text: content }),
       signal: pcmAbortController.signal,
     });
-
     if (!response.ok) {
-      throw new Error(await fetchErrorDetail(response, 'Voce non disponibile.'));
+      throw new Error(await fetchErrorDetail(response, 'Voce clonata non disponibile.'));
     }
-
     if (!greeting && response.headers.get('X-Audio-Format') === 'pcm_s16le_mono') {
       await playPcmStream(response);
       return;
     }
-
     const blob = await response.blob();
     if (!blob.size) throw new Error('Audio vuoto.');
     await playGeneratedAudio(blob);
   } catch (error) {
     if (error?.name === 'AbortError') return;
-    console.warn('[JARVIS] TTS:', error);
+    console.warn('[JARVIS] TTS primario:', error);
+    setHint('Voce clonata in preparazione: uso temporaneamente la voce del browser.');
     speaking = false;
-    reopenConversation();
+    await speakBrowserFallback(content);
   }
 }
 
