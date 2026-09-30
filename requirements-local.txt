@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Optional desktop/local JARVIS runtime.
+# Kept separate so Emergent/cloud preview does not install heavy audio/AI packages.
+faster-whisper>=1.1,<2
+openWakeWord>=0.6,<1
+kokoro>=0.9,<1
+sounddevice>=0.5,<1
+numpy>=1.26,<3
