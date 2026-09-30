@@ -75,6 +75,16 @@ Write-Host "[3/5] Installo dipendenze CosyVoice nell'ambiente separato..."
 & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install --upgrade pip
 Assert-LastExit "Aggiornamento pip CosyVoice"
 
+# OmegaConf/Hydra richiedono ANTLR 4.9.x. Su PyPI la 4.9.3 e' solo una
+# source distribution e il suo wheel build storico fallisce su Windows cercando
+# bin\pygrun. Conda-forge pubblica invece un pacchetto noarch pronto all'uso.
+Write-Host "  - Installo ANTLR 4.9.3 precompilato da conda-forge (workaround Windows)..."
+& $condaExe install -n jarvis-cosyvoice -y --override-channels -c conda-forge "antlr4-python3-runtime=4.9.3"
+Assert-LastExit "Installazione ANTLR 4.9.3 da conda-forge"
+
+& $condaExe run --no-capture-output -n jarvis-cosyvoice python -c "import antlr4; print('ANTLR runtime OK')"
+Assert-LastExit "Verifica ANTLR runtime"
+
 # openai-whisper==20231117 (ancora richiesto dal repository ufficiale CosyVoice)
 # usa pkg_resources durante il build. Con i tool di build moderni e build
 # isolation su Windows può fallire con ModuleNotFoundError: pkg_resources.
