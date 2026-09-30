@@ -28,7 +28,6 @@ def main() -> None:
     # is active, even if cloud/web-only previews keep those features disabled.
     settings.voice_enabled = True
     settings.presence_enabled = True
-    settings.openjarvis_enabled = True
 
     stt = LocalSTT(
         model_name=settings.stt_model,
@@ -185,7 +184,8 @@ def main() -> None:
     print(f"[JARVIS] Wake word: {settings.wake_model}")
     print(f"[JARVIS] Voice: {voice_name} · {'READY' if tts_ready else 'PENDING SAMPLE'}")
     print(f"[JARVIS] Presence context: {settings.presence_context_seconds:.0f}s (RAM only)")
-    print("[JARVIS] Hybrid cognitive engine: OpenJarvis + guarded local agent")
+    cognitive_label = "OpenJarvis + guarded local agent" if settings.openjarvis_enabled else "guarded local agent"
+    print(f"[JARVIS] Hybrid cognitive engine: {cognitive_label}")
     print("[JARVIS] UI: http://127.0.0.1:8000")
     print("[JARVIS] Ctrl+C per uscire.")
 
