@@ -1,18 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import JarvisCore from './JarvisCore';
 
 const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 const WEBGL_PARTICLE_COUNT = 28000;
 
-function averageBand(data, from, to) {
-  let total = 0;
-  let count = 0;
-  const end = Math.min(to, data.length);
-  for (let i = Math.max(0, from); i < end; i += 1) {
-    total += data[i];
-    count += 1;
-  }
-  return count ? total / (count * 255) : 0;
+function greetingForNow() {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Buongiorno, signore. Come sta oggi?';
+  if (hour < 18) return 'Buon pomeriggio, signore. Come sta andando la giornata?';
+  return 'Buonasera, signore. È un piacere rivederla. Come sta?';
 }
 
 function Metric({ label, value }) {
@@ -25,42 +21,79 @@ function Metric({ label, value }) {
 }
 
 export default function App() {
-  const [mode, setMode] = useState('IDLE');
-  const [reply, setReply] = useState('');
-  const [message, setMessage] = useState('');
-  const [hint, setHint] = useState('Premi il microfono: il core reagirà in tempo reale alla tua voce.');
+  const [mode, setMode] = useState('SPEAKING');
+  const [reply, setReply] = useState(() => greetingForNow());
+  const [hint, setHint] = useState('JARVIS è online. La conversazione è vocale.');
   const [online, setOnline] = useState('INITIALIZING');
   const [model, setModel] = useState('CLOUD CORE');
   const [clock, setClock] = useState('00:00:00');
-  const [micActive, setMicActive] = useState(false);
   const [localVoiceActive, setLocalVoiceActive] = useState(false);
   const [localRuntimeState, setLocalRuntimeState] = useState('IDLE');
-  const [audioLevel, setAudioLevel] = useState(0);
+  const [audioLevel] = useState(0);
   const [bootVisible, setBootVisible] = useState(true);
 
-  const visualStateRef = useRef('IDLE');
+  const visualStateRef = useRef('SPEAKING');
   const audioLevelRef = useRef(0);
   const audioBandsRef = useRef({ bass: 0, mid: 0, high: 0 });
-  const mediaStreamRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const analyserRef = useRef(null);
-  const audioDataRef = useRef(null);
-  const micRafRef = useRef(0);
   const runtimePauseUntilRef = useRef(0);
+  const greetingRef = useRef(reply);
 
   const particleCount = WEBGL_PARTICLE_COUNT.toLocaleString('it-IT');
 
-  const changeMode = (next) => {
+  const changeMode = useCallback((next) => {
     const normalized = String(next || 'IDLE').toUpperCase();
     visualStateRef.current = normalized;
     setMode(normalized);
-  };
+  }, []);
+
+  const sendVoiceMessage = useCallback(async (rawText) => {
+    const text = String(rawText || '').trim();
+    if (!text) return;
+
+    runtimePauseUntilRef.current = Date.now() + 30000;
+    setReply('');
+    setHint('Un momento, signore…');
+    changeMode('THINKING');
+
+    try {
+      const response = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Errore durante la richiesta');
+
+      const answer = String(data.reply || '').trim() || 'Sono qui, signore.';
+      setReply(answer);
+      if (data.model) setModel(String(data.model).slice(0, 48));
+      changeMode('SPEAKING');
+      setHint('');
+      window.dispatchEvent(new CustomEvent('jarvis:reply-ready', { detail: { text: answer } }));
+      runtimePauseUntilRef.current = Date.now() + 4000;
+    } catch (error) {
+      const message = error?.message || 'Il cervello cloud non è disponibile.';
+      setReply(message);
+      setHint('Non riesco a raggiungere il cervello AI in questo momento.');
+      changeMode('ERROR');
+      runtimePauseUntilRef.current = Date.now() + 4000;
+    }
+  }, [changeMode]);
+
+  useEffect(() => {
+    const onVoiceInput = (event) => sendVoiceMessage(event?.detail?.text || '');
+    window.addEventListener('jarvis:voice-input', onVoiceInput);
+    return () => window.removeEventListener('jarvis:voice-input', onVoiceInput);
+  }, [sendVoiceMessage]);
 
   useEffect(() => {
     const updateClock = () => setClock(new Date().toLocaleTimeString('it-IT', { hour12: false }));
     updateClock();
     const timer = setInterval(updateClock, 1000);
     const bootTimer = setTimeout(() => setBootVisible(false), 1550);
+    const greetTimer = setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('jarvis:greeting', { detail: { text: greetingRef.current } }));
+    }, 450);
 
     const health = async () => {
       try {
@@ -82,6 +115,7 @@ export default function App() {
       clearInterval(timer);
       clearInterval(healthTimer);
       clearTimeout(bootTimer);
+      clearTimeout(greetTimer);
     };
   }, []);
 
@@ -89,7 +123,7 @@ export default function App() {
     let disposed = false;
 
     const syncRuntimeState = async () => {
-      if (disposed || mediaStreamRef.current || Date.now() < runtimePauseUntilRef.current) return;
+      if (disposed || Date.now() < runtimePauseUntilRef.current) return;
       try {
         const response = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
         if (!response.ok) return;
@@ -104,164 +138,34 @@ export default function App() {
         setMode(next);
 
         if (data.pending_confirmation) {
-          setHint(`Conferma richiesta per: ${data.pending_confirmation}. Di' “confermo” oppure “annulla”.`);
+          setHint(`Conferma richiesta per ${data.pending_confirmation}.`);
         } else if (next === 'LISTENING') {
-          setHint('Wake word rilevata — Jarvis ti sta ascoltando.');
+          setHint('La ascolto, signore.');
         } else if (next === 'THINKING') {
-          setHint('Jarvis sta elaborando la richiesta con il cervello AI cloud…');
+          setHint('Sto valutando la richiesta…');
         } else if (next === 'EXECUTING') {
-          setHint('Jarvis sta usando uno strumento locale…');
+          setHint('Sto procedendo.');
         } else if (next === 'SPEAKING') {
-          setHint('Jarvis sta rispondendo.');
+          setHint('');
         } else if (next === 'IDLE') {
-          setHint('Di’ “Hey Jarvis” oppure scrivi una richiesta.');
+          setHint('In attesa, signore.');
         }
       } catch {
-        // Runtime sync is optional; health status already reports backend failures.
+        // Il runtime desktop è opzionale nella preview web.
       }
     };
 
     syncRuntimeState();
-    const stateTimer = setInterval(syncRuntimeState, 300);
+    const stateTimer = setInterval(syncRuntimeState, 600);
     return () => {
       disposed = true;
       clearInterval(stateTimer);
     };
   }, []);
 
-  useEffect(() => () => {
-    cancelAnimationFrame(micRafRef.current);
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    audioContextRef.current?.close();
-  }, []);
-
-  const monitorMicrophone = () => {
-    const analyser = analyserRef.current;
-    const data = audioDataRef.current;
-    if (!analyser || !data) return;
-
-    analyser.getByteFrequencyData(data);
-    const bassRaw = averageBand(data, 2, 28);
-    const midRaw = averageBand(data, 28, 105);
-    const highRaw = averageBand(data, 105, 230);
-    const previous = audioBandsRef.current;
-    const smooth = (oldValue, nextValue, attack, release) => (
-      oldValue + (nextValue - oldValue) * (nextValue > oldValue ? attack : release)
-    );
-
-    const bands = {
-      bass: smooth(previous.bass, bassRaw, 0.37, 0.075),
-      mid: smooth(previous.mid, midRaw, 0.32, 0.085),
-      high: smooth(previous.high, highRaw, 0.29, 0.105),
-    };
-    audioBandsRef.current = bands;
-
-    const raw = bands.bass * 0.46 + bands.mid * 0.37 + bands.high * 0.17;
-    const next = audioLevelRef.current + (raw - audioLevelRef.current) * (raw > audioLevelRef.current ? 0.36 : 0.09);
-    audioLevelRef.current = next;
-    setAudioLevel(next);
-    micRafRef.current = requestAnimationFrame(monitorMicrophone);
-  };
-
-  const stopMicrophone = () => {
-    cancelAnimationFrame(micRafRef.current);
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    audioContextRef.current?.close();
-    mediaStreamRef.current = null;
-    audioContextRef.current = null;
-    analyserRef.current = null;
-    audioDataRef.current = null;
-    audioLevelRef.current = 0;
-    audioBandsRef.current = { bass: 0, mid: 0, high: 0 };
-    setAudioLevel(0);
-    setMicActive(false);
-    setHint(localVoiceActive ? 'Di’ “Hey Jarvis” oppure scrivi una richiesta.' : 'Premi il microfono: il core reagirà in tempo reale alla tua voce.');
-    changeMode('IDLE');
-  };
-
-  const toggleMicrophone = async () => {
-    if (micActive) {
-      stopMicrophone();
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-      const audioContext = new AudioContextCtor();
-      await audioContext.resume();
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.66;
-      source.connect(analyser);
-
-      mediaStreamRef.current = stream;
-      audioContextRef.current = audioContext;
-      analyserRef.current = analyser;
-      audioDataRef.current = new Uint8Array(analyser.frequencyBinCount);
-      setMicActive(true);
-      setHint('Ti sto ascoltando — bassi, medi e alti stanno pilotando il core GPU.');
-      changeMode('LISTENING');
-      monitorMicrophone();
-    } catch (error) {
-      setReply(`Microfono non disponibile: ${error.message}`);
-      setHint('Il browser non ha concesso l’accesso al microfono.');
-      changeMode('ERROR');
-    }
-  };
-
-  const submit = async (event) => {
-    event.preventDefault();
-    const text = message.trim();
-    if (!text) return;
-
-    runtimePauseUntilRef.current = Date.now() + 15000;
-    setMessage('');
-    setReply('');
-    setHint('Elaborazione della richiesta…');
-    changeMode('THINKING');
-
-    try {
-      const response = await fetch(`${API_BASE}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Errore durante la richiesta');
-
-      setReply(data.reply || '');
-      if (data.model) setModel(data.model);
-      changeMode(data.state || 'SPEAKING');
-      setHint('Risposta completata.');
-      runtimePauseUntilRef.current = Date.now() + 2300;
-
-      setTimeout(() => {
-        if (!mediaStreamRef.current) {
-          changeMode('IDLE');
-          setHint(localVoiceActive ? 'Di’ “Hey Jarvis” oppure scrivi una richiesta.' : 'Premi il microfono: il core reagirà in tempo reale alla tua voce.');
-        }
-      }, 2200);
-    } catch (error) {
-      runtimePauseUntilRef.current = Date.now() + 2300;
-      setReply(error.message);
-      setHint('Il backend è online, ma i provider AI gratuiti non sono disponibili o non sono ancora configurati.');
-      changeMode('ERROR');
-    }
-  };
-
-  const voiceLink = micActive
-    ? 'BROWSER LIVE'
-    : localVoiceActive
-      ? (localRuntimeState === 'IDLE' ? 'LOCAL READY' : localRuntimeState)
-      : 'STANDBY';
+  const voiceLink = localVoiceActive
+    ? (localRuntimeState === 'IDLE' ? 'LOCAL READY' : localRuntimeState)
+    : 'VOICE FIRST';
 
   return (
     <div className="jarvis-app">
@@ -304,29 +208,10 @@ export default function App() {
           <Metric label="VOICE LINK" value={voiceLink} />
         </div>
 
-        <div className="center-ui">
+        <div className="center-ui voice-only">
           <div className="state">{mode}</div>
           <div className="hint">{hint}</div>
           <div className="reply">{reply}</div>
-          <div className="controls">
-            <form className="command" onSubmit={submit}>
-              <input
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                autoComplete="off"
-                placeholder="Parla con Jarvis…"
-              />
-              <button className="send" aria-label="Invia" type="submit">→</button>
-            </form>
-            <button
-              className={`mic ${micActive ? 'active' : ''}`}
-              onClick={toggleMicrophone}
-              aria-label="Microfono"
-              type="button"
-            >
-              ◉
-            </button>
-          </div>
         </div>
       </div>
 
@@ -335,7 +220,7 @@ export default function App() {
           <div className="boot-inner">
             <div className="boot-logo">JARVIS</div>
             <div className="boot-line" />
-            <div className="boot-text">INITIALIZING GPU PARTICLE INTELLIGENCE CORE</div>
+            <div className="boot-text">INITIALIZING JARVIS COGNITIVE CORE</div>
           </div>
         </div>
       )}
