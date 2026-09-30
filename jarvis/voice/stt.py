@@ -35,7 +35,10 @@ class LocalSTT:
         self.last_recording_heard_speech = False
         self.last_recording_max_rms = 0.0
         self.last_recording_speech_threshold = 0.0
+        self.last_recording_noise_floor = 0.0
+        self.last_recording_release_threshold = 0.0
         self.last_recording_gain = 1.0
+        self.last_recording_end_reason = ""
 
     @staticmethod
     def dependency_status() -> dict[str, bool]:
@@ -94,11 +97,7 @@ class LocalSTT:
         return STTResult(text=text, language=detected)
 
     def warmup(self) -> tuple[str, float]:
-        """Load Whisper/CUDA before the wake word is needed.
-
-        Without this, the first spoken request pays the model/CUDA startup cost
-        after JARVIS already printed "Ti ascolto...", which feels like a hang.
-        """
+        """Load Whisper/CUDA before the wake word is needed."""
         if self._warm:
             return self._model_device or "unknown", 0.0
 
@@ -158,17 +157,20 @@ class LocalSTT:
     def record_until_silence(
         self,
         sample_rate: int = 16000,
-        silence_threshold: float = 0.00035,
-        speech_threshold: float = 0.00065,
-        silence_seconds: float = 0.60,
+        silence_threshold: float = 0.00045,
+        speech_threshold: float = 0.00090,
+        silence_seconds: float = 0.52,
         max_seconds: float = 30.0,
         initial_silence_seconds: float | None = 6.0,
     ):
-        """Record one natural conversational turn from the selected mic.
+        """Record one natural conversational turn with adaptive energy VAD.
 
-        If no chunk crosses the speech threshold, return an empty array. This is
-        intentional: decoding pure silence lets Whisper hallucinate phrases and
-        can accidentally send a fake command to the brain.
+        Windows audio interfaces often have a stable noise floor above the old
+        fixed 0.00065 speech threshold. That made room noise look like continuous
+        speech and JARVIS stayed in LISTENING until max_seconds. The detector now
+        estimates the local noise floor before speech starts, freezes an adaptive
+        speech threshold when speech begins, then closes the utterance after a
+        short relative-energy release.
         """
         import numpy as np
         import sounddevice as sd
@@ -177,9 +179,12 @@ class LocalSTT:
         self.last_recording_heard_speech = False
         self.last_recording_max_rms = 0.0
         self.last_recording_speech_threshold = float(speech_threshold)
+        self.last_recording_noise_floor = 0.0
+        self.last_recording_release_threshold = float(silence_threshold)
         self.last_recording_gain = 1.0
+        self.last_recording_end_reason = ""
 
-        chunk_seconds = 0.12
+        chunk_seconds = 0.10
         chunk = int(sample_rate * chunk_seconds)
         silent_needed = max(1, int(silence_seconds / chunk_seconds))
         max_chunks = max(1, int(max_seconds / chunk_seconds))
@@ -187,9 +192,12 @@ class LocalSTT:
         if initial_silence_seconds is not None:
             initial_chunks = max(1, int(max(0.2, initial_silence_seconds) / chunk_seconds))
 
-        silent_chunks = 0
+        silent_chunks = 0.0
         heard_speech = False
         recording: list[Any] = []
+        noise_samples: list[float] = []
+        frozen_speech_threshold = float(speech_threshold)
+        frozen_release_threshold = float(silence_threshold)
 
         stream_kwargs: dict[str, Any] = {
             "samplerate": sample_rate,
@@ -203,7 +211,9 @@ class LocalSTT:
         with sd.RawInputStream(**stream_kwargs) as stream:
             for index in range(max_chunks):
                 if self.abort_event.is_set():
+                    self.last_recording_end_reason = "abort"
                     break
+
                 data, _overflowed = stream.read(chunk)
                 pcm = np.frombuffer(data, dtype=np.int16).copy()
                 flat = pcm.astype(np.float32) / 32768.0
@@ -211,19 +221,52 @@ class LocalSTT:
                 rms = float(np.sqrt(np.mean(np.square(flat)))) if flat.size else 0.0
                 self.last_recording_max_rms = max(self.last_recording_max_rms, rms)
 
-                if rms >= speech_threshold:
-                    heard_speech = True
-                    self.last_recording_heard_speech = True
-                    silent_chunks = 0
-                elif heard_speech and rms < silence_threshold:
-                    silent_chunks += 1
-                elif heard_speech:
-                    silent_chunks += 0.35
+                if not heard_speech:
+                    if noise_samples:
+                        noise_floor = float(np.percentile(np.asarray(noise_samples, dtype=np.float32), 45))
+                    else:
+                        noise_floor = 0.0
 
-                if heard_speech and silent_chunks >= silent_needed:
-                    break
+                    adaptive_speech = max(float(speech_threshold), 0.00090, noise_floor * 2.20)
+                    self.last_recording_noise_floor = noise_floor
+                    self.last_recording_speech_threshold = adaptive_speech
+
+                    if rms >= adaptive_speech:
+                        heard_speech = True
+                        self.last_recording_heard_speech = True
+                        frozen_speech_threshold = adaptive_speech
+                        frozen_release_threshold = max(
+                            float(silence_threshold),
+                            0.00055,
+                            noise_floor * 1.60,
+                            adaptive_speech * 0.48,
+                        )
+                        self.last_recording_release_threshold = frozen_release_threshold
+                        silent_chunks = 0.0
+                    else:
+                        noise_samples.append(rms)
+                        if len(noise_samples) > 30:
+                            noise_samples.pop(0)
+                else:
+                    if rms >= frozen_speech_threshold:
+                        silent_chunks = 0.0
+                    elif rms <= frozen_release_threshold:
+                        silent_chunks += 1.0
+                    else:
+                        # Transition zone: count toward endpoint slowly so soft
+                        # syllable tails are not cut, but stable interface noise
+                        # can no longer keep LISTENING alive indefinitely.
+                        silent_chunks += 0.45
+
+                    if silent_chunks >= silent_needed:
+                        self.last_recording_end_reason = "silence"
+                        break
+
                 if not heard_speech and initial_chunks is not None and index + 1 >= initial_chunks:
+                    self.last_recording_end_reason = "initial-timeout"
                     break
+            else:
+                self.last_recording_end_reason = "max-timeout"
 
         if not heard_speech:
             return np.zeros(0, dtype=np.float32)
