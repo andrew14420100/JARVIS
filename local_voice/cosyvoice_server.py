@@ -12,13 +12,16 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 
+JARVIS_SPEAKER_ID = "jarvis_cloned_voice"
+
+
 class TTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     speed: float = Field(default=1.0, ge=0.7, le=1.3)
 
 
-def build_app(cosyvoice, prompt_text: str, prompt_speech_16k, model_name: str) -> FastAPI:
-    app = FastAPI(title="JARVIS Local Voice", version="1.0")
+def build_app(cosyvoice, speaker_id: str, model_name: str) -> FastAPI:
+    app = FastAPI(title="JARVIS Local Voice", version="1.1")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
@@ -35,6 +38,7 @@ def build_app(cosyvoice, prompt_text: str, prompt_speech_16k, model_name: str) -
             "model": model_name,
             "sample_rate": int(cosyvoice.sample_rate),
             "reference_voice_configured": True,
+            "speaker_cached": True,
             "streaming": True,
         }
 
@@ -46,10 +50,14 @@ def build_app(cosyvoice, prompt_text: str, prompt_speech_16k, model_name: str) -
 
         def generate():
             try:
+                # The reference voice is converted to a reusable speaker profile
+                # once at startup. Every subsequent phrase avoids re-encoding the
+                # WAV and can begin streaming audio sooner.
                 output = cosyvoice.inference_zero_shot(
                     clean,
-                    prompt_text,
-                    prompt_speech_16k,
+                    "",
+                    "",
+                    zero_shot_spk_id=speaker_id,
                     stream=True,
                     speed=request.speed,
                 )
@@ -111,18 +119,24 @@ def main() -> None:
     if not prompt_transcript:
         raise SystemExit("La trascrizione della voce di riferimento è vuota.")
 
-    # CosyVoice 3 uses the prompt prefix below in its official zero-shot examples.
+    # CosyVoice 3 uses this prefix in the official zero-shot examples.
     prompt_text = f"You are a helpful assistant.<|endofprompt|>{prompt_transcript}"
     prompt_speech_16k = load_wav(str(reference_audio), 16000)
 
     print("[COSYVOICE] Carico Fun-CosyVoice3-0.5B-2512...")
     cosyvoice = AutoModel(model_dir=str(model_dir))
-    print(f"[COSYVOICE] Pronto · sample rate {cosyvoice.sample_rate} Hz")
 
+    print("[COSYVOICE] Precalcolo il profilo della voce JARVIS...")
+    if not cosyvoice.add_zero_shot_spk(prompt_text, prompt_speech_16k, JARVIS_SPEAKER_ID):
+        raise SystemExit("CosyVoice non è riuscito a registrare la voce di riferimento.")
+
+    print(
+        f"[COSYVOICE] Pronto · speaker in memoria · "
+        f"sample rate {cosyvoice.sample_rate} Hz"
+    )
     app = build_app(
         cosyvoice,
-        prompt_text,
-        prompt_speech_16k,
+        JARVIS_SPEAKER_ID,
         "Fun-CosyVoice3-0.5B-2512",
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
