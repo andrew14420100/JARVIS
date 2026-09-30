@@ -14,12 +14,7 @@ from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
 def _post_wake_speech_profile(audio, *, sample_rate: int = 16000) -> tuple[bool, float, float, float]:
-    """Decide whether real speech continued after the wake word.
-
-    The decision is based only on audio captured *after* openWakeWord fired.
-    A dynamic floor derived from the local noise level replaces the old fixed
-    threshold that could mistake a 0.0007 room-noise tail for speech.
-    """
+    """Decide whether real speech continued after the wake word."""
     import numpy as np
 
     array = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -133,15 +128,18 @@ def main() -> None:
         )
         capture_seconds = time.monotonic() - capture_started
 
-        # If neither the live STT stream nor the post-wake buffer contains real
-        # speech, do not invoke Whisper at all. Decoding silence is what allowed
-        # hallucinated phrases to reach the brain in earlier builds.
+        diagnostic = (
+            f"max_rms={stt.last_recording_max_rms:.4f} "
+            f"noise={stt.last_recording_noise_floor:.4f} "
+            f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
+            f"release={stt.last_recording_release_threshold:.4f} "
+            f"fine={stt.last_recording_end_reason or 'unknown'}"
+        )
+
         if not stt.last_recording_heard_speech and not activation_has_speech:
             print(
-                f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
-                f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
-                f"speech=no gain=1.0x · capture={capture_seconds:.2f}s · "
-                "decode=saltata (nessuna voce)"
+                f"[STT] {diagnostic} speech=no gain=1.0x · "
+                f"capture={capture_seconds:.2f}s · decode=saltata (nessuna voce)"
             )
             return ""
 
@@ -152,12 +150,15 @@ def main() -> None:
             pieces.append(audio.astype(np.float32, copy=False))
         if not pieces:
             print(
-                f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
-                f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
-                f"speech=no gain=1.0x · capture={capture_seconds:.2f}s · "
-                "decode=saltata (audio vuoto)"
+                f"[STT] {diagnostic} speech=no gain=1.0x · "
+                f"capture={capture_seconds:.2f}s · decode=saltata (audio vuoto)"
             )
             return ""
+
+        # Recording is over: the UI must stop saying LISTENING while Whisper is
+        # decoding. This also makes it obvious whether a stall is capture or AI.
+        agent.set_state(JarvisState.THINKING)
+        print(f"[JARVIS] Voce rilevata · elaboro... · {diagnostic}")
 
         combined = pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
         stt_started = time.monotonic()
@@ -167,9 +168,7 @@ def main() -> None:
         speech_label = "si" if stt.last_recording_heard_speech else "post-wake"
 
         print(
-            f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
-            f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
-            f"speech={speech_label} gain={stt.last_recording_gain:.1f}x · "
+            f"[STT] {diagnostic} speech={speech_label} gain={stt.last_recording_gain:.1f}x · "
             f"capture={capture_seconds:.2f}s · decode={stt_seconds:.2f}s"
         )
         return text
@@ -209,9 +208,6 @@ def main() -> None:
             return
         busy.set()
 
-        # openWakeWord owns the microphone a little longer after the trigger.
-        # It records only the chunks AFTER the activating chunk into a dedicated
-        # post-wake buffer. Whisper will never receive the wake phrase itself.
         time.sleep(0.62)
 
         post_wake_audio = None
@@ -235,7 +231,7 @@ def main() -> None:
                 )
                 text = capture_turn(
                     initial_silence_seconds=0.9,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 15.0),
+                    max_seconds=min(settings.listener_max_utterance_seconds, 12.0),
                     activation_audio=post_wake_audio,
                     activation_has_speech=True,
                 )
@@ -255,8 +251,8 @@ def main() -> None:
                         print(f"[JARVIS] TTS prompt non disponibile: {exc}")
                 print("[JARVIS] In ascolto del comando...")
                 text = capture_turn(
-                    initial_silence_seconds=5.0,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 20.0),
+                    initial_silence_seconds=3.5,
+                    max_seconds=min(settings.listener_max_utterance_seconds, 12.0),
                 )
 
             if not text:
@@ -270,8 +266,8 @@ def main() -> None:
             while not stt.abort_event.is_set():
                 print("[JARVIS] Conversazione attiva · ascolto...")
                 followup = capture_turn(
-                    initial_silence_seconds=settings.listener_followup_silence_seconds,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 30.0),
+                    initial_silence_seconds=min(settings.listener_followup_silence_seconds, 6.0),
+                    max_seconds=min(settings.listener_max_utterance_seconds, 20.0),
                 )
                 if not stt.last_recording_heard_speech and not followup:
                     print("[JARVIS] Standby.")
