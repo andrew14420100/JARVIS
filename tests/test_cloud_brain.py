@@ -22,7 +22,11 @@ def test_rejects_unlisted_nvidia_model():
         )
 
 
-def test_prefers_nemotron_and_enables_thinking_for_agentic_calls():
+def _tool_schema():
+    return [{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}]
+
+
+def test_prefers_nemotron_and_enables_thinking_for_complex_agentic_calls():
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -49,8 +53,11 @@ def test_prefers_nemotron_and_enables_thinking_for_agentic_calls():
 
     message = client.chat_completion(
         model="nvidia/nemotron-3-ultra-550b-a55b",
-        messages=[{"role": "user", "content": "esegui un compito"}],
-        tools=[{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}],
+        messages=[{
+            "role": "user",
+            "content": "analizza il progetto, diagnostica il problema, pianifica i passaggi e verifica e correggi il risultato",
+        }],
+        tools=_tool_schema(),
     )
 
     assert message["content"] == "nemotron ok"
@@ -58,6 +65,33 @@ def test_prefers_nemotron_and_enables_thinking_for_agentic_calls():
     assert seen[0]["chat_template_kwargs"]["enable_thinking"] is True
     assert client.status()["active_provider"] == "nvidia-free"
     assert client.status()["paid_fallback"] is False
+    client.close()
+
+
+def test_keeps_thinking_disabled_for_short_conversation_even_with_tools_available():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append(payload)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "Bene, signore."}}]},
+        )
+
+    client = CloudAIClient(nvidia_api_key="nvapi-test")
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    message = client.chat_completion(
+        model="nvidia/nemotron-3-ultra-550b-a55b",
+        messages=[{"role": "user", "content": "come va?"}],
+        tools=_tool_schema(),
+    )
+
+    assert message["content"] == "Bene, signore."
+    assert seen[0]["chat_template_kwargs"]["enable_thinking"] is False
+    assert "tools" in seen[0]
     client.close()
 
 
