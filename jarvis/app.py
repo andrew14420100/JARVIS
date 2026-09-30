@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from jarvis.agent.orchestrator import JarvisOrchestrator
 from jarvis.brain.lmstudio import LMStudioClient, LMStudioError
 from jarvis.config.settings import get_settings
+from jarvis.core.state import JarvisState
 from jarvis.memory import LocalMemory
 from jarvis.tools.defaults import build_default_registry
 from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
@@ -151,7 +152,12 @@ def chat(request: ChatRequest) -> ChatResponse:
     try:
         agent = get_orchestrator()
         reply = agent.process_message(request.message)
-        return ChatResponse(reply=reply, state=agent.state.value, model=agent.model)
+        response_state = agent.state.value
+        response = ChatResponse(reply=reply, state=response_state, model=agent.model)
+        # Typed chat has no backend TTS lifecycle, so return the visual state to
+        # the browser and then leave the shared runtime ready for voice wake-up.
+        agent.set_state(JarvisState.IDLE)
+        return response
     except LMStudioError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
