@@ -26,12 +26,9 @@ class CosyVoiceAudio:
 class CosyVoiceProxyTTS:
     """Client for the warm CosyVoice 3 service running beside JARVIS.
 
-    CosyVoice can emit streaming PCM with irregular generation cadence. Writing
-    each generated chunk directly to PortAudio makes audible gaps whenever the
-    model momentarily generates slower than real time. Desktop speech therefore
-    buffers complete short speech segments and pipelines generation of the next
-    segment while the current one is being played. This preserves a responsive
-    first utterance without starving the audio device between inference chunks.
+    Desktop playback buffers short complete speech segments. This prevents
+    inference jitter from starving PortAudio while keeping the first spoken
+    segment short enough to start quickly.
     """
 
     def __init__(
@@ -131,7 +128,6 @@ class CosyVoiceProxyTTS:
                 pass
         try:
             import sounddevice as sd
-
             sd.stop()
         except Exception:
             pass
@@ -179,13 +175,16 @@ class CosyVoiceProxyTTS:
         return CosyVoiceAudio(buffer.getvalue())
 
     @staticmethod
-    def _speech_segments(text: str, max_chars: int = 150) -> list[str]:
-        """Create short natural segments that can be buffered before playback."""
+    def _speech_segments(text: str, max_chars: int = 88) -> list[str]:
+        """Create short natural segments for quick first-speech latency."""
         clean = " ".join(str(text or "").strip().split())
         if not clean:
             return []
 
-        rough = re.split(r"(?<=[.!?;:])\s+", clean)
+        # Commas are also useful boundaries for spoken Italian. Short segments
+        # reduce time-to-first-audio while the next segment is generated in
+        # parallel during playback.
+        rough = re.split(r"(?<=[.!?;:,])\s+", clean)
         segments: list[str] = []
         for part in rough:
             part = part.strip()
@@ -225,7 +224,7 @@ class CosyVoiceProxyTTS:
         self._speaking.set()
         stream = None
         producer: threading.Thread | None = None
-        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=2)
+        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=3)
         try:
             self._health()
             first_started = time.monotonic()
@@ -254,9 +253,6 @@ class CosyVoiceProxyTTS:
                 )
                 producer.start()
 
-            # A stable output buffer is preferable to ultra-low latency here:
-            # inference latency is already paid before playback starts, while a
-            # PortAudio underflow is perceived as the voice cutting in and out.
             stream = sd.RawOutputStream(
                 samplerate=self._sample_rate,
                 channels=1,
