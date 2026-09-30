@@ -13,6 +13,12 @@ function Require-Command([string]$Name, [string]$Help) {
     return $cmd
 }
 
+function Assert-LastExit([string]$Step) {
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Step non riuscito (exit code $LASTEXITCODE)."
+    }
+}
+
 function Set-EnvValue([string]$Key, [string]$Value) {
     $envPath = Join-Path $PSScriptRoot ".env"
     if (-not (Test-Path $envPath)) {
@@ -41,7 +47,7 @@ function Set-EnvValue([string]$Key, [string]$Value) {
 }
 
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " JARVIS · SETUP COMPLETO LOCALE" -ForegroundColor Cyan
+Write-Host " JARVIS - SETUP COMPLETO LOCALE" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
 Write-Host "[1/8] Controllo strumenti di base..."
@@ -52,7 +58,7 @@ Require-Command npm "Installa Node.js LTS." | Out-Null
 $pythonVersion = (& py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
 $pythonOk = (& py -c "import sys; print(int((3,10) <= sys.version_info[:2] < (3,14)))").Trim()
 if ($pythonOk -ne "1") {
-    throw "Python $pythonVersion non compatibile. Usa Python 3.10-3.13; consigliato 3.11."
+    throw "Python $pythonVersion non compatibile. Usa Python 3.10-3.13; consigliato 3.11 o 3.12 per la massima compatibilita'."
 }
 Write-Host "Python $pythonVersion OK."
 
@@ -105,21 +111,27 @@ if (-not (Test-Path $voiceText)) {
 Write-Host "[5/8] Preparo ambiente Python JARVIS..."
 if (-not (Test-Path ".venv")) {
     & py -m venv .venv
+    Assert-LastExit "Creazione .venv"
 }
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 & $python -m pip install --upgrade pip
+Assert-LastExit "Aggiornamento pip"
 & $python -m pip install -r requirements-local.txt
+Assert-LastExit "Installazione requirements-local.txt"
 
 Write-Host "[6/8] Preparo wake word..."
 & $python -c "from openwakeword import utils; utils.download_models()"
+Assert-LastExit "Download modelli openWakeWord"
 
 Write-Host "[7/8] Compilo frontend..."
 Push-Location (Join-Path $PSScriptRoot "frontend")
 try {
     if (-not (Test-Path "node_modules")) {
         npm install
+        Assert-LastExit "npm install"
     }
     npm run build
+    Assert-LastExit "npm run build"
 } finally {
     Pop-Location
 }
@@ -136,6 +148,7 @@ if (-not $cosyInstalled -and -not $SkipCosyVoiceSetup) {
     } else {
         Write-Host "CosyVoice non ancora installato: avvio setup dedicato..."
         powershell -ExecutionPolicy Bypass -File ".\setup-cosyvoice.ps1"
+        Assert-LastExit "Setup CosyVoice"
     }
 }
 
