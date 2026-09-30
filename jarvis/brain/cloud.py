@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from jarvis.brain.lmstudio import LMStudioClient, LMStudioError
+
 
 class CloudAIError(RuntimeError):
     pass
@@ -24,11 +26,16 @@ class CloudProvider:
 class CloudAIClient:
     """OpenAI-compatible cloud client restricted to explicitly free routes.
 
-    Provider priority is deterministic:
+    Normal cloud priority is deterministic:
     NVIDIA Nemotron 3 Ultra -> Z.AI free GLM -> Groq Free -> OpenRouter Free.
 
-    JARVIS never substitutes a paid model. If every configured free provider is
-    unavailable or rate-limited, the request fails instead of becoming billable.
+    When ``local_fallback_enabled`` is true and NVIDIA is configured, JARVIS
+    tries the local LM Studio model immediately after a failed NVIDIA request.
+    This gives the desktop runtime the desired path:
+
+        Nemotron 3 Ultra -> local Qwen/LM Studio -> other configured free routes.
+
+    JARVIS never substitutes a paid model.
     """
 
     NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -53,12 +60,20 @@ class CloudAIClient:
         timeout_seconds: float = 120.0,
         app_name: str = "JARVIS",
         app_url: str = "",
+        local_fallback_enabled: bool = False,
+        local_fallback_base_url: str = "http://127.0.0.1:1234/v1",
     ) -> None:
         self._client = httpx.Client(timeout=timeout_seconds)
         self.providers: list[CloudProvider] = []
         self.last_provider = ""
         self.last_model = ""
         self.last_error = ""
+        self._local_fallback_enabled = bool(local_fallback_enabled)
+        self._local_fallback = (
+            LMStudioClient(local_fallback_base_url, timeout_seconds)
+            if self._local_fallback_enabled
+            else None
+        )
 
         if nvidia_api_key.strip():
             selected_nvidia = nvidia_model.strip() or "nvidia/nemotron-3-ultra-550b-a55b"
@@ -128,6 +143,8 @@ class CloudAIClient:
 
     def close(self) -> None:
         self._client.close()
+        if self._local_fallback is not None:
+            self._local_fallback.close()
 
     def _headers(self, provider: CloudProvider) -> dict[str, str]:
         return {
@@ -145,7 +162,7 @@ class CloudAIClient:
         return self.providers
 
     def list_models(self) -> list[str]:
-        """Return only the configured free-only model ids."""
+        """Return configured cloud model ids without pinging remote providers."""
         return [provider.model for provider in self._configured_or_raise()]
 
     def resolve_model(self, configured_model: str = "") -> str:
@@ -193,12 +210,7 @@ class CloudAIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> bool:
-        """Do not send the entire tool schema during ordinary voice chat.
-
-        Tool schemas are large and add avoidable latency. Conversational turns
-        therefore stay lightweight, while operational/deep requests still get
-        the full agent toolset.
-        """
+        """Avoid sending the full tool schema during ordinary voice chat."""
         if not tools:
             return False
         text = cls._latest_user_text(messages)
@@ -216,6 +228,58 @@ class CloudAIClient:
         )
         return any(marker in text for marker in markers)
 
+    def _request_provider(
+        self,
+        provider: CloudProvider,
+        *,
+        messages: list[dict[str, Any]],
+        selected_tools: list[dict[str, Any]] | None,
+        temperature: float,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": provider.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if provider.extra_body:
+            payload.update(provider.extra_body)
+        if provider.supports_dynamic_thinking:
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self._is_agentic_request(messages, selected_tools)
+            }
+        if selected_tools:
+            payload["tools"] = selected_tools
+            payload["tool_choice"] = "auto"
+
+        response = self._client.post(
+            f"{provider.base_url}/chat/completions",
+            headers=self._headers(provider),
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]
+
+    def _request_local_fallback(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        selected_tools: list[dict[str, Any]] | None,
+        temperature: float,
+    ) -> dict[str, Any]:
+        if self._local_fallback is None:
+            raise LMStudioError("Fallback locale LM Studio disabilitato.")
+        local_model = self._local_fallback.resolve_model("")
+        message = self._local_fallback.chat_completion(
+            model=local_model,
+            messages=messages,
+            tools=selected_tools,
+            temperature=temperature,
+        )
+        self.last_provider = "lmstudio-local-fallback"
+        self.last_model = local_model
+        return message
+
     def chat_completion(
         self,
         *,
@@ -224,35 +288,49 @@ class CloudAIClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]:
-        del model  # each provider is pinned to its own free-only model id.
+        del model  # each provider is pinned to its configured free-only model id.
+        providers = self._configured_or_raise()
         errors: list[str] = []
         selected_tools = tools if self._should_offer_tools(messages, tools) else None
 
-        for provider in self._configured_or_raise():
-            payload: dict[str, Any] = {
-                "model": provider.model,
-                "messages": messages,
-                "temperature": temperature,
-            }
-            if provider.extra_body:
-                payload.update(provider.extra_body)
-            if provider.supports_dynamic_thinking:
-                payload["chat_template_kwargs"] = {
-                    "enable_thinking": self._is_agentic_request(messages, selected_tools)
-                }
-            if selected_tools:
-                payload["tools"] = selected_tools
-                payload["tool_choice"] = "auto"
-
+        start_index = 0
+        if providers and providers[0].name == "nvidia-free":
+            nvidia = providers[0]
             try:
-                response = self._client.post(
-                    f"{provider.base_url}/chat/completions",
-                    headers=self._headers(provider),
-                    json=payload,
+                message = self._request_provider(
+                    nvidia,
+                    messages=messages,
+                    selected_tools=selected_tools,
+                    temperature=temperature,
                 )
-                response.raise_for_status()
-                data = response.json()
-                message = data["choices"][0]["message"]
+                self.last_provider = nvidia.name
+                self.last_model = nvidia.model
+                self.last_error = ""
+                return message
+            except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
+                errors.append(f"{nvidia.name}: {exc}")
+                start_index = 1
+
+            if self._local_fallback_enabled:
+                try:
+                    message = self._request_local_fallback(
+                        messages=messages,
+                        selected_tools=selected_tools,
+                        temperature=temperature,
+                    )
+                    self.last_error = " | ".join(errors)
+                    return message
+                except (LMStudioError, ValueError, KeyError, IndexError) as exc:
+                    errors.append(f"lmstudio-local-fallback: {exc}")
+
+        for provider in providers[start_index:]:
+            try:
+                message = self._request_provider(
+                    provider,
+                    messages=messages,
+                    selected_tools=selected_tools,
+                    temperature=temperature,
+                )
                 self.last_provider = provider.name
                 self.last_model = provider.model
                 self.last_error = ""
@@ -260,19 +338,35 @@ class CloudAIClient:
             except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
                 errors.append(f"{provider.name}: {exc}")
 
+        if self._local_fallback_enabled and start_index == 0:
+            try:
+                message = self._request_local_fallback(
+                    messages=messages,
+                    selected_tools=selected_tools,
+                    temperature=temperature,
+                )
+                self.last_error = " | ".join(errors)
+                return message
+            except (LMStudioError, ValueError, KeyError, IndexError) as exc:
+                errors.append(f"lmstudio-local-fallback: {exc}")
+
         self.last_error = " | ".join(errors)
         raise CloudAIError(
-            "Tutti i provider AI gratuiti configurati sono temporaneamente non disponibili "
-            f"o hanno raggiunto i propri limiti. Dettagli: {self.last_error}"
+            "Tutti i cervelli AI gratuiti configurati sono temporaneamente non disponibili. "
+            f"Dettagli: {self.last_error}"
         )
 
     def status(self) -> dict[str, object]:
+        configured = [provider.name for provider in self.providers]
+        if self._local_fallback_enabled:
+            configured.append("lmstudio-local-fallback")
         return {
-            "mode": "cloud-free",
-            "configured": [provider.name for provider in self.providers],
+            "mode": "cloud-free-with-local-fallback" if self._local_fallback_enabled else "cloud-free",
+            "configured": configured,
             "models": [provider.model for provider in self.providers],
             "active_provider": self.last_provider,
             "active_model": self.last_model,
             "last_error": self.last_error,
+            "local_fallback_enabled": self._local_fallback_enabled,
             "paid_fallback": False,
         }
