@@ -30,12 +30,14 @@ def main() -> None:
     settings = get_settings()
     settings.voice_enabled = True
     settings.presence_enabled = True
+    input_device = settings.audio_input_device.strip() or None
 
     stt = LocalSTT(
         model_name=settings.stt_model,
         device=settings.stt_device,
         compute_type=settings.stt_compute_type,
         language=settings.stt_language,
+        input_device=input_device,
     )
 
     if settings.tts_mode.strip().lower() == "cosyvoice-local" and settings.cosyvoice_enabled:
@@ -57,6 +59,7 @@ def main() -> None:
         threshold=settings.wake_threshold,
         chunk_size=settings.wake_chunk_size,
         context_seconds=settings.presence_context_seconds,
+        input_device=input_device,
     )
     presence = PresenceContext(
         max_items=settings.presence_max_items,
@@ -107,6 +110,11 @@ def main() -> None:
             f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
             f"speech={'si' if stt.last_recording_heard_speech else 'no'}"
         )
+        if stt.last_recording_max_rms <= 0.0001:
+            print(
+                "[STT] Ingresso audio muto. Se persiste, imposta JARVIS_AUDIO_INPUT_DEVICE "
+                "nel file .env con il nome del microfono corretto."
+            )
 
         combined = audio
         if activation_audio is not None and getattr(activation_audio, "size", 0):
@@ -114,8 +122,6 @@ def main() -> None:
                 (activation_audio.astype(np.float32, copy=False), audio.astype(np.float32, copy=False))
             )
 
-        # Even when the RMS gate says "no", let Whisper inspect the short audio
-        # buffer: its own VAD is better at recovering quiet speech.
         result = stt.transcribe(combined)
         text = result.text.strip()
         if strip_wake:
@@ -155,8 +161,6 @@ def main() -> None:
         ambient_audio = None
         activation_audio = None
         try:
-            # Keep the wake tail so a single natural sentence such as
-            # "Jarvis, apri Chrome" is not split and partially lost.
             activation_audio = wake.recent_audio(2.5, exclude_tail_seconds=0.0)
             if settings.presence_enabled:
                 ambient_audio = wake.recent_audio(min(settings.presence_context_seconds, 8.0))
@@ -174,9 +178,6 @@ def main() -> None:
                 strip_wake=True,
             )
 
-            # If the user only said the wake word, acknowledge naturally and
-            # then wait for the actual request. If they continued immediately,
-            # no acknowledgement interrupts their sentence.
             if not text:
                 if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
                     try:
@@ -210,8 +211,6 @@ def main() -> None:
             ambient_context = presence.as_context() if settings.presence_enabled else ""
             answer_turn(text, ambient_context=ambient_context)
 
-            # Keep the same voice session alive after the first answer. The user
-            # can continue speaking naturally without saying Jarvis again.
             while not stt.abort_event.is_set():
                 print("[JARVIS] Conversazione attiva · ascolto...")
                 followup = capture_turn(
@@ -260,6 +259,8 @@ def main() -> None:
     print(f"[JARVIS] Presence context: {settings.presence_context_seconds:.0f}s (RAM only)")
     cognitive_label = "OpenJarvis + guarded local agent" if settings.openjarvis_enabled else "guarded local agent"
     print(f"[JARVIS] Hybrid cognitive engine: {cognitive_label}")
+    if input_device:
+        print(f"[JARVIS] Input audio configurato: {input_device}")
     print("[JARVIS] UI: http://127.0.0.1:8000")
     print("[JARVIS] Ctrl+C per uscire.")
 
