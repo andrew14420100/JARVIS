@@ -18,6 +18,11 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function isFreeProviderRateLimit(message) {
+  const value = String(message || '').toLowerCase();
+  return value.includes('429') || value.includes('too many requests') || value.includes('rate limit');
+}
+
 export default function App() {
   const [mode, setMode] = useState('INITIALIZING');
   const [reply, setReply] = useState('');
@@ -72,9 +77,14 @@ export default function App() {
       runtimePauseUntilRef.current = Date.now() + 4000;
     } catch (error) {
       const message = error?.message || 'Il cervello cloud non è disponibile.';
-      setReply(message);
-      setHint('');
-      changeMode('ERROR');
+      setReply('');
+      if (isFreeProviderRateLimit(message)) {
+        setHint('Il provider AI gratuito ha raggiunto il limite temporaneo.');
+        changeMode('WAITING');
+      } else {
+        setHint('JARVIS non riesce a raggiungere il cervello AI in questo momento.');
+        changeMode('ERROR');
+      }
       runtimePauseUntilRef.current = Date.now() + 4000;
     }
   }, [changeMode]);
@@ -141,6 +151,15 @@ export default function App() {
         } catch (error) {
           lastError = error;
           console.warn(`[JARVIS] Session start attempt ${attempt}:`, error);
+
+          if (isFreeProviderRateLimit(error?.message)) {
+            sessionGreetingStarted = false;
+            setReply('');
+            setHint('Il provider AI gratuito ha raggiunto il limite temporaneo.');
+            changeMode('WAITING');
+            return;
+          }
+
           if (attempt < 3) await sleep(attempt * 1200);
         }
       }
