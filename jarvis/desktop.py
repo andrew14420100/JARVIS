@@ -14,6 +14,10 @@ from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
 
 def main() -> None:
     settings = get_settings()
+    # Running this entrypoint explicitly means the local voice runtime is active,
+    # even if the shared .env keeps voice disabled for cloud/web-only previews.
+    settings.voice_enabled = True
+
     stt = LocalSTT(
         model_name=settings.stt_model,
         device=settings.stt_device,
