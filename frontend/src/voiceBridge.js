@@ -5,6 +5,8 @@ let submitted = false;
 let speaking = false;
 let greetingSpoken = false;
 let retryOnGestureInstalled = false;
+let voiceSessionStarted = false;
+let micPermissionGranted = false;
 let activeAudio = null;
 let activeAudioUrl = '';
 let pcmContext = null;
@@ -13,12 +15,19 @@ let pcmGeneration = 0;
 const pcmSources = new Set();
 
 const RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-const FOLLOWUP_MS = 12000;
+const FOLLOWUP_MS = 20000;
+const RESTART_DELAY_MS = 350;
 const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 
 function setHint(text) {
   const hint = document.querySelector('.hint');
   if (hint) hint.textContent = text || '';
+}
+
+function setVoiceState(state, detail = '') {
+  window.dispatchEvent(new CustomEvent('jarvis:voice-state', {
+    detail: { state, detail },
+  }));
 }
 
 function stopRecognition() {
@@ -68,6 +77,7 @@ function stopAudio() {
 function emitVoiceInput(text) {
   const value = String(text || '').trim();
   if (!value) return;
+  setVoiceState('submitted', value);
   window.dispatchEvent(new CustomEvent('jarvis:voice-input', { detail: { text: value } }));
 }
 
@@ -83,7 +93,11 @@ function installGestureRetry(action) {
 }
 
 async function ensureMicPermission() {
-  if (!navigator.mediaDevices?.getUserMedia) return false;
+  if (micPermissionGranted) return true;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setVoiceState('unsupported', 'getUserMedia non disponibile');
+    return false;
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -93,67 +107,117 @@ async function ensureMicPermission() {
       },
     });
     stream.getTracks().forEach((track) => track.stop());
+    micPermissionGranted = true;
+    setVoiceState('ready');
     return true;
-  } catch {
+  } catch (error) {
+    console.warn('[JARVIS] Microphone permission:', error);
+    setVoiceState('blocked', error?.name || 'microphone-blocked');
     return false;
   }
 }
 
+function normalizeWakeTranscript(text) {
+  const value = String(text || '').trim();
+  if (!value) return { activated: false, command: '' };
+
+  const wakePattern = /\b(?:hey\s+)?jarvis\b[\s,.:;!?-]*/i;
+  const match = value.match(wakePattern);
+  if (!match) return { activated: false, command: value };
+
+  const index = match.index || 0;
+  const command = `${value.slice(0, index)} ${value.slice(index + match[0].length)}`
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { activated: true, command };
+}
+
+function scheduleRecognitionRestart(delay = RESTART_DELAY_MS) {
+  if (!voiceSessionStarted || speaking || recognitionRunning) return;
+  window.setTimeout(() => {
+    if (voiceSessionStarted && !speaking && !recognitionRunning) startRecognitionWindow();
+  }, delay);
+}
+
 function startRecognitionWindow() {
-  if (!RecognitionCtor || recognitionRunning || speaking) return;
-  if (Date.now() >= followupDeadline) {
-    setHint('In attesa, signore.');
-    return;
-  }
+  if (!RecognitionCtor || recognitionRunning || speaking || !voiceSessionStarted) return;
 
   submitted = false;
   recognition = new RecognitionCtor();
   recognition.lang = 'it-IT';
   recognition.continuous = false;
-  recognition.interimResults = false;
+  recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
   recognition.onstart = () => {
     recognitionRunning = true;
-    setHint('La ascolto, signore.');
+    const inFollowup = Date.now() < followupDeadline;
+    setVoiceState(inFollowup ? 'listening' : 'standby');
+    setHint(inFollowup ? 'La ascolto, signore.' : 'Dica “Jarvis” per richiamare la mia attenzione.');
   };
 
   recognition.onresult = (event) => {
-    let text = '';
+    let finalText = '';
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
-      if (result?.isFinal) text += result?.[0]?.transcript || '';
+      if (result?.isFinal) finalText += result?.[0]?.transcript || '';
     }
-    text = text.trim();
-    if (!text || submitted) return;
+
+    finalText = finalText.trim();
+    if (!finalText || submitted) return;
+
+    const inFollowup = Date.now() < followupDeadline;
+    const parsed = normalizeWakeTranscript(finalText);
+
+    if (!inFollowup && !parsed.activated) {
+      // Room conversation while JARVIS is in standby is deliberately ignored.
+      setVoiceState('standby');
+      setHint('Dica “Jarvis” per richiamare la mia attenzione.');
+      return;
+    }
+
+    if (!inFollowup && parsed.activated && !parsed.command) {
+      followupDeadline = Date.now() + FOLLOWUP_MS;
+      setVoiceState('listening');
+      setHint('La ascolto, signore.');
+      return;
+    }
+
+    const textToSubmit = inFollowup ? finalText : parsed.command;
+    if (!textToSubmit) return;
 
     submitted = true;
+    followupDeadline = 0;
     stopRecognition();
     setHint('');
-    emitVoiceInput(text);
+    emitVoiceInput(textToSubmit);
   };
 
   recognition.onerror = (event) => {
     recognitionRunning = false;
     if (event.error === 'aborted') return;
+
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-      setHint('Il browser richiede il permesso al microfono. Tocchi o clicchi una volta sulla pagina.');
-      installGestureRetry(() => openFollowupWindow(FOLLOWUP_MS));
+      micPermissionGranted = false;
+      setVoiceState('blocked', event.error);
+      setHint('Microfono bloccato. Consenta il microfono al sito; se è nella preview Emergent, apra la preview in una nuova scheda.');
+      installGestureRetry(startVoiceSession);
       return;
     }
-    if (event.error !== 'no-speech') {
+
+    if (event.error === 'network') {
+      setVoiceState('recognition-error', 'network');
+      setHint('Il riconoscimento vocale del browser non è raggiungibile. Riprovo automaticamente.');
+    } else if (event.error !== 'no-speech') {
       console.warn('[JARVIS] Speech recognition:', event.error);
+      setVoiceState('recognition-error', event.error);
     }
   };
 
   recognition.onend = () => {
     recognitionRunning = false;
     recognition = null;
-    if (!submitted && !speaking && Date.now() < followupDeadline) {
-      window.setTimeout(startRecognitionWindow, 250);
-    } else if (!submitted && Date.now() >= followupDeadline) {
-      setHint('In attesa, signore.');
-    }
+    if (!speaking && voiceSessionStarted) scheduleRecognitionRestart();
   };
 
   try {
@@ -162,30 +226,47 @@ function startRecognitionWindow() {
     recognitionRunning = false;
     recognition = null;
     console.warn('[JARVIS] Unable to start recognition:', error);
+    scheduleRecognitionRestart(700);
   }
 }
 
-async function openFollowupWindow(duration = FOLLOWUP_MS) {
+async function startVoiceSession() {
   if (!RecognitionCtor) {
+    setVoiceState('unsupported');
     setHint('La conversazione vocale automatica richiede Chrome o Edge aggiornato.');
     return;
   }
 
-  followupDeadline = Date.now() + duration;
   const allowed = await ensureMicPermission();
   if (!allowed) {
-    setHint('Consenta l’accesso al microfono. Dopo il primo permesso JARVIS non avrà bisogno di pulsanti.');
-    installGestureRetry(() => openFollowupWindow(duration));
+    setHint('Consenta l’accesso al microfono. Se Emergent è aperto in una preview incorporata, apra il sito in una nuova scheda.');
+    installGestureRetry(startVoiceSession);
     return;
   }
+
+  voiceSessionStarted = true;
+  setVoiceState('standby');
   startRecognitionWindow();
+}
+
+async function openFollowupWindow(duration = FOLLOWUP_MS) {
+  followupDeadline = Date.now() + duration;
+  if (!voiceSessionStarted) {
+    await startVoiceSession();
+    return;
+  }
+  if (!speaking && !recognitionRunning) startRecognitionWindow();
 }
 
 function completeSpeech({ openFollowup, greeting }) {
   speaking = false;
   if (greeting) greetingSpoken = true;
   stopAudio();
-  if (openFollowup) openFollowupWindow();
+  if (openFollowup) {
+    openFollowupWindow();
+  } else {
+    scheduleRecognitionRestart();
+  }
 }
 
 async function playGeneratedAudio(blob, options) {
@@ -194,6 +275,7 @@ async function playGeneratedAudio(blob, options) {
   activeAudio.preload = 'auto';
   activeAudio.onplaying = () => {
     speaking = true;
+    setVoiceState('speaking');
     setHint('');
   };
   activeAudio.onended = () => completeSpeech(options);
@@ -263,6 +345,7 @@ async function playPcmStream(response, options) {
   let heardAnything = false;
 
   speaking = true;
+  setVoiceState('speaking');
   setHint('');
 
   while (true) {
@@ -331,12 +414,10 @@ async function speak(text, { openFollowup = true, greeting = false } = {}) {
   stopAudio();
   followupDeadline = 0;
   speaking = true;
+  setVoiceState('speaking');
   setHint('');
 
   try {
-    // Opening audio uses a complete WAV so browsers can retry the same clip if
-    // autoplay is blocked. Conversational replies use raw PCM streaming and
-    // begin playing as soon as CosyVoice produces the first chunk.
     const endpoint = greeting ? '/api/tts' : '/api/tts/stream';
     pcmAbortController = new AbortController();
     const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -365,9 +446,14 @@ async function speak(text, { openFollowup = true, greeting = false } = {}) {
     if (error?.name === 'NotAllowedError') {
       setHint('Tocchi o clicchi una volta per autorizzare l’audio.');
     } else {
-      setHint('Voce locale in attesa del campione vocale.');
+      // TTS and STT are independent: keep listening even when CosyVoice is not ready.
+      setHint('Voce in preparazione. Il microfono resta disponibile.');
     }
-    if (openFollowup) openFollowupWindow();
+    if (openFollowup) {
+      openFollowupWindow();
+    } else {
+      scheduleRecognitionRestart();
+    }
   }
 }
 
@@ -382,7 +468,18 @@ window.addEventListener('jarvis:reply-ready', (event) => {
   speak(event?.detail?.text || '', { openFollowup: true, greeting: false });
 });
 
+// Browser voice input must not depend on the TTS engine being available. Start
+// permission/listening on the first normal user interaction with the page.
+const bootstrapVoice = () => {
+  document.removeEventListener('pointerdown', bootstrapVoice, true);
+  document.removeEventListener('keydown', bootstrapVoice, true);
+  startVoiceSession();
+};
+document.addEventListener('pointerdown', bootstrapVoice, true);
+document.addEventListener('keydown', bootstrapVoice, true);
+
 window.addEventListener('beforeunload', () => {
+  voiceSessionStarted = false;
   stopRecognition();
   stopAudio();
   if (pcmContext && pcmContext.state !== 'closed') {
