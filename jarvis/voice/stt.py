@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,7 +13,7 @@ class STTResult:
 
 
 class LocalSTT:
-    """Lazy faster-whisper wrapper with microphone VAD-style recording."""
+    """Lazy faster-whisper wrapper with low-latency microphone capture."""
 
     def __init__(
         self,
@@ -29,6 +30,7 @@ class LocalSTT:
         self.input_device = input_device
         self._model: Any | None = None
         self._model_device: str | None = None
+        self._warm = False
         self.abort_event = threading.Event()
         self.last_recording_heard_speech = False
         self.last_recording_max_rms = 0.0
@@ -60,10 +62,11 @@ class LocalSTT:
             requested_device = "cuda"
 
         try:
+            compute_type = "int8" if force_cpu else self.compute_type
             model = WhisperModel(
                 self.model_name,
                 device=requested_device,
-                compute_type="int8" if force_cpu else self.compute_type,
+                compute_type=compute_type,
             )
             self._model = model
             self._model_device = requested_device
@@ -75,34 +78,51 @@ class LocalSTT:
             self._model_device = "cpu"
         return self._model
 
-    def _transcribe_once(self, model, audio):
-        """Run one Whisper pass and eagerly consume the lazy segment generator.
-
-        Keep the prompt deliberately neutral. Biasing Whisper with the wake-word
-        sentence caused quiet captures to hallucinate that exact sentence instead
-        of transcribing what the user actually said.
-        """
+    def _transcribe_once(self, model, audio, *, beam_size: int = 1, vad_filter: bool = True):
+        """Run one Whisper pass and eagerly consume its lazy generator."""
         segments, info = model.transcribe(
             audio,
-            beam_size=3,
+            beam_size=beam_size,
             language=self.language or None,
-            vad_filter=True,
+            vad_filter=vad_filter,
             condition_on_previous_text=False,
-            initial_prompt="Conversazione naturale in italiano.",
+            temperature=0.0,
         )
         segments = list(segments)
         text = " ".join(segment.text.strip() for segment in segments).strip()
         detected = getattr(info, "language", None)
         return STTResult(text=text, language=detected)
 
-    def _normalize_audio(self, audio):
-        """Raise very quiet microphone captures without clipping.
+    def warmup(self) -> tuple[str, float]:
+        """Load Whisper/CUDA before the wake word is needed.
 
-        Some Windows USB endpoints expose valid speech at RMS values below
-        0.001. Whisper works much better if that signal is normalized before its
-        internal VAD. Keep the gain bounded to avoid amplifying pure digital
-        silence or background hiss excessively.
+        Without this, the first spoken request pays the model/CUDA startup cost
+        after JARVIS already printed "Ti ascolto...", which feels like a hang.
         """
+        if self._warm:
+            return self._model_device or "unknown", 0.0
+
+        import numpy as np
+
+        started = time.monotonic()
+        model = self._load_model()
+        probe = np.zeros(16000, dtype=np.float32)
+        try:
+            # Force CTranslate2 to initialize kernels/libraries now. VAD is off
+            # so the inference path is actually touched even on silent audio.
+            self._transcribe_once(model, probe, beam_size=1, vad_filter=False)
+        except Exception as exc:
+            if self._model_device != "cpu":
+                print(f"[STT] Warm-up GPU non disponibile ({exc}); fallback CPU.")
+                model = self._load_model(force_cpu=True)
+                self._transcribe_once(model, probe, beam_size=1, vad_filter=False)
+            else:
+                raise
+        self._warm = True
+        return self._model_device or "unknown", time.monotonic() - started
+
+    def _normalize_audio(self, audio):
+        """Raise quiet microphone captures without clipping pure silence."""
         import numpy as np
 
         array = np.asarray(audio, dtype=np.float32)
@@ -125,29 +145,25 @@ class LocalSTT:
         normalized = self._normalize_audio(audio)
         model = self._load_model()
         try:
-            return self._transcribe_once(model, normalized)
+            return self._transcribe_once(model, normalized, beam_size=1, vad_filter=True)
         except Exception as exc:
             if self._model_device != "cpu":
                 print(f"[STT] GPU non disponibile ({exc}); fallback CPU.")
                 model = self._load_model(force_cpu=True)
-                return self._transcribe_once(model, normalized)
+                self._warm = True
+                return self._transcribe_once(model, normalized, beam_size=1, vad_filter=True)
             raise
 
     def record_until_silence(
         self,
         sample_rate: int = 16000,
-        silence_threshold: float = 0.00028,
-        speech_threshold: float = 0.00055,
-        silence_seconds: float = 0.75,
+        silence_threshold: float = 0.00035,
+        speech_threshold: float = 0.00065,
+        silence_seconds: float = 0.60,
         max_seconds: float = 30.0,
         initial_silence_seconds: float | None = 6.0,
     ):
-        """Record one natural conversational turn from a low-level Windows mic.
-
-        Wake-word detection has already proven that some user devices expose
-        speech around RMS 0.001, so use permissive thresholds here and let
-        Whisper's own VAD plus normalization perform the semantic filtering.
-        """
+        """Record one natural conversational turn from the selected mic."""
         import numpy as np
         import sounddevice as sd
 
@@ -157,7 +173,7 @@ class LocalSTT:
         self.last_recording_speech_threshold = float(speech_threshold)
         self.last_recording_gain = 1.0
 
-        chunk_seconds = 0.16
+        chunk_seconds = 0.12
         chunk = int(sample_rate * chunk_seconds)
         silent_needed = max(1, int(silence_seconds / chunk_seconds))
         max_chunks = max(1, int(max_seconds / chunk_seconds))
@@ -195,6 +211,10 @@ class LocalSTT:
                     silent_chunks = 0
                 elif heard_speech and rms < silence_threshold:
                     silent_chunks += 1
+                elif heard_speech:
+                    # Background noise between the speech and silence threshold
+                    # must not keep the turn open forever.
+                    silent_chunks += 0.35
 
                 if heard_speech and silent_chunks >= silent_needed:
                     break
