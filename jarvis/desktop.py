@@ -110,11 +110,6 @@ def main() -> None:
             f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
             f"speech={'si' if stt.last_recording_heard_speech else 'no'}"
         )
-        if stt.last_recording_max_rms <= 0.0001:
-            print(
-                "[STT] Ingresso audio muto. Se persiste, imposta JARVIS_AUDIO_INPUT_DEVICE "
-                "nel file .env con il nome del microfono corretto."
-            )
 
         combined = audio
         if activation_audio is not None and getattr(activation_audio, "size", 0):
@@ -167,6 +162,12 @@ def main() -> None:
         except Exception:
             activation_audio = None
             ambient_audio = None
+
+        # The wake listener has already probed a working PortAudio endpoint.
+        # Reuse the exact numeric device for STT instead of asking Windows for a
+        # possibly different default after the wake stream closes.
+        if wake.selected_device is not None:
+            stt.input_device = wake.selected_device
 
         wake.pause()
         try:
@@ -259,8 +260,6 @@ def main() -> None:
     print(f"[JARVIS] Presence context: {settings.presence_context_seconds:.0f}s (RAM only)")
     cognitive_label = "OpenJarvis + guarded local agent" if settings.openjarvis_enabled else "guarded local agent"
     print(f"[JARVIS] Hybrid cognitive engine: {cognitive_label}")
-    if input_device:
-        print(f"[JARVIS] Input audio configurato: {input_device}")
     print("[JARVIS] UI: http://127.0.0.1:8000")
     print("[JARVIS] Ctrl+C per uscire.")
 
