@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,7 +20,7 @@ class LocalSTT:
         self,
         model_name: str = "small",
         device: str = "auto",
-        compute_type: str = "int8",
+        compute_type: str = "float16",
         language: str = "it",
         input_device: str | int | None = None,
     ) -> None:
@@ -81,7 +82,7 @@ class LocalSTT:
             self._model_device = "cpu"
         return self._model
 
-    def _transcribe_once(self, model, audio, *, beam_size: int = 1, vad_filter: bool = True):
+    def _transcribe_once(self, model, audio, *, beam_size: int = 1, vad_filter: bool = False):
         """Run one Whisper pass and eagerly consume its lazy generator."""
         segments, info = model.transcribe(
             audio,
@@ -97,7 +98,6 @@ class LocalSTT:
         return STTResult(text=text, language=detected)
 
     def warmup(self) -> tuple[str, float]:
-        """Load Whisper/CUDA before the wake word is needed."""
         if self._warm:
             return self._model_device or "unknown", 0.0
 
@@ -105,7 +105,7 @@ class LocalSTT:
 
         started = time.monotonic()
         model = self._load_model()
-        probe = np.zeros(16000, dtype=np.float32)
+        probe = np.zeros(8000, dtype=np.float32)
         try:
             self._transcribe_once(model, probe, beam_size=1, vad_filter=False)
         except Exception as exc:
@@ -119,7 +119,6 @@ class LocalSTT:
         return self._model_device or "unknown", time.monotonic() - started
 
     def _normalize_audio(self, audio):
-        """Raise quiet microphone captures without clipping pure silence."""
         import numpy as np
 
         array = np.asarray(audio, dtype=np.float32)
@@ -145,13 +144,15 @@ class LocalSTT:
 
         model = self._load_model()
         try:
-            return self._transcribe_once(model, normalized, beam_size=1, vad_filter=True)
+            # JARVIS already performs endpoint detection before this call. A
+            # second Silero VAD pass inside faster-whisper only adds latency.
+            return self._transcribe_once(model, normalized, beam_size=1, vad_filter=False)
         except Exception as exc:
             if self._model_device != "cpu":
                 print(f"[STT] GPU non disponibile ({exc}); fallback CPU.")
                 model = self._load_model(force_cpu=True)
                 self._warm = True
-                return self._transcribe_once(model, normalized, beam_size=1, vad_filter=True)
+                return self._transcribe_once(model, normalized, beam_size=1, vad_filter=False)
             raise
 
     def record_until_silence(
@@ -159,18 +160,15 @@ class LocalSTT:
         sample_rate: int = 16000,
         silence_threshold: float = 0.00045,
         speech_threshold: float = 0.00090,
-        silence_seconds: float = 0.52,
+        silence_seconds: float = 0.36,
         max_seconds: float = 30.0,
         initial_silence_seconds: float | None = 6.0,
     ):
-        """Record one natural conversational turn with adaptive energy VAD.
+        """Record one turn using adaptive energy endpointing.
 
-        Windows audio interfaces often have a stable noise floor above the old
-        fixed 0.00065 speech threshold. That made room noise look like continuous
-        speech and JARVIS stayed in LISTENING until max_seconds. The detector now
-        estimates the local noise floor before speech starts, freezes an adaptive
-        speech threshold when speech begins, then closes the utterance after a
-        short relative-energy release.
+        Only a tiny pre-roll before the first speech frame is retained. The old
+        implementation sent seconds of waiting/silence to Whisper, which made a
+        short spoken request unnecessarily expensive to decode.
         """
         import numpy as np
         import sounddevice as sd
@@ -184,7 +182,7 @@ class LocalSTT:
         self.last_recording_gain = 1.0
         self.last_recording_end_reason = ""
 
-        chunk_seconds = 0.10
+        chunk_seconds = 0.08
         chunk = int(sample_rate * chunk_seconds)
         silent_needed = max(1, int(silence_seconds / chunk_seconds))
         max_chunks = max(1, int(max_seconds / chunk_seconds))
@@ -195,6 +193,7 @@ class LocalSTT:
         silent_chunks = 0.0
         heard_speech = False
         recording: list[Any] = []
+        pre_roll: deque[Any] = deque(maxlen=2)
         noise_samples: list[float] = []
         frozen_speech_threshold = float(speech_threshold)
         frozen_release_threshold = float(silence_threshold)
@@ -217,7 +216,6 @@ class LocalSTT:
                 data, _overflowed = stream.read(chunk)
                 pcm = np.frombuffer(data, dtype=np.int16).copy()
                 flat = pcm.astype(np.float32) / 32768.0
-                recording.append(flat)
                 rms = float(np.sqrt(np.mean(np.square(flat)))) if flat.size else 0.0
                 self.last_recording_max_rms = max(self.last_recording_max_rms, rms)
 
@@ -242,21 +240,23 @@ class LocalSTT:
                             adaptive_speech * 0.48,
                         )
                         self.last_recording_release_threshold = frozen_release_threshold
+                        recording.extend(pre_roll)
+                        recording.append(flat)
+                        pre_roll.clear()
                         silent_chunks = 0.0
                     else:
+                        pre_roll.append(flat)
                         noise_samples.append(rms)
                         if len(noise_samples) > 30:
                             noise_samples.pop(0)
                 else:
+                    recording.append(flat)
                     if rms >= frozen_speech_threshold:
                         silent_chunks = 0.0
                     elif rms <= frozen_release_threshold:
                         silent_chunks += 1.0
                     else:
-                        # Transition zone: count toward endpoint slowly so soft
-                        # syllable tails are not cut, but stable interface noise
-                        # can no longer keep LISTENING alive indefinitely.
-                        silent_chunks += 0.45
+                        silent_chunks += 0.50
 
                     if silent_chunks >= silent_needed:
                         self.last_recording_end_reason = "silence"
@@ -268,9 +268,7 @@ class LocalSTT:
             else:
                 self.last_recording_end_reason = "max-timeout"
 
-        if not heard_speech:
-            return np.zeros(0, dtype=np.float32)
-        if not recording:
+        if not heard_speech or not recording:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(recording).astype(np.float32, copy=False)
 
