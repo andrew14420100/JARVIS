@@ -8,6 +8,7 @@ MODEL_DIR="${COSY_ROOT}/models/Fun-CosyVoice3-0.5B"
 VENV_DIR="${COSY_ROOT}/venv"
 VOICE_DIR="${ROOT_DIR}/private/voices"
 SUPERVISOR_CONF="/etc/supervisor/conf.d/jarvis-cosyvoice.conf"
+CPU_REQUIREMENTS="${COSY_ROOT}/requirements-cpu.txt"
 
 mkdir -p "${COSY_ROOT}" "${COSY_ROOT}/models" "${VOICE_DIR}"
 chmod +x "${ROOT_DIR}/scripts/run-cosyvoice-emergent.sh"
@@ -15,9 +16,23 @@ chmod +x "${ROOT_DIR}/scripts/run-cosyvoice-emergent.sh"
 echo "[JARVIS] Emergent CosyVoice setup"
 echo "[JARVIS] Root: ${ROOT_DIR}"
 
-# Register the long-lived service first. It remains RUNNING while it waits for
-# GPU, model files or the private reference voice instead of disappearing from
-# Supervisor with 'no such process'.
+GPU_AVAILABLE=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  GPU_AVAILABLE=1
+  echo "[JARVIS] NVIDIA GPU rilevata:"
+  nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | head -n 1 || true
+else
+  echo "[JARVIS] Nessuna GPU NVIDIA visibile: preparo CosyVoice in modalità CPU."
+  echo "[JARVIS] La qualità resta la stessa; la latenza dipenderà dalle CPU assegnate da Emergent."
+fi
+
+CPU_FLAG=0
+if [[ "${GPU_AVAILABLE}" != "1" ]]; then
+  CPU_FLAG=1
+fi
+
+# Supervisor is always registered. In CPU mode the flag is persisted in the
+# program environment so the worker does not remain stuck in WAITING_FOR_GPU.
 if command -v supervisorctl >/dev/null 2>&1 && [[ -d /etc/supervisor/conf.d ]] && [[ -w /etc/supervisor/conf.d ]]; then
   cat > "${SUPERVISOR_CONF}" <<EOF
 [program:jarvis-cosyvoice]
@@ -31,31 +46,13 @@ stopasgroup=true
 killasgroup=true
 stdout_logfile=/var/log/jarvis-cosyvoice.log
 stderr_logfile=/var/log/jarvis-cosyvoice-error.log
-environment=PYTHONUNBUFFERED="1"
+environment=PYTHONUNBUFFERED="1",JARVIS_ALLOW_CPU_COSYVOICE="${CPU_FLAG}"
 EOF
   echo "[JARVIS] Registro jarvis-cosyvoice in Supervisor..."
   supervisorctl reread || true
   supervisorctl update || true
 else
   echo "[JARVIS] Supervisor non disponibile: il servizio dovrà essere avviato manualmente."
-fi
-
-GPU_AVAILABLE=0
-if command -v nvidia-smi >/dev/null 2>&1; then
-  if nvidia-smi >/dev/null 2>&1; then
-    GPU_AVAILABLE=1
-    echo "[JARVIS] NVIDIA GPU rilevata:"
-    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | head -n 1 || true
-  fi
-fi
-
-if [[ "${GPU_AVAILABLE}" != "1" ]]; then
-  echo "[JARVIS] ATTENZIONE: nessuna GPU NVIDIA visibile nel container Emergent."
-  echo "[JARVIS] jarvis-cosyvoice è comunque registrato e resterà in WAITING_FOR_GPU."
-  echo "[JARVIS] Per forzare un test CPU: JARVIS_ALLOW_CPU_COSYVOICE=1 bash $0"
-  if [[ "${JARVIS_ALLOW_CPU_COSYVOICE:-0}" != "1" ]]; then
-    exit 20
-  fi
 fi
 
 choose_python() {
@@ -112,8 +109,23 @@ fi
 
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip setuptools wheel
 
-echo "[JARVIS] Installo runtime CosyVoice ufficiale..."
-"${VENV_DIR}/bin/python" -m pip install -r "${COSY_REPO}/requirements.txt"
+if [[ "${GPU_AVAILABLE}" == "1" ]]; then
+  echo "[JARVIS] Installo runtime CosyVoice CUDA ufficiale..."
+  "${VENV_DIR}/bin/python" -m pip install -r "${COSY_REPO}/requirements.txt"
+else
+  echo "[JARVIS] Installo runtime CosyVoice CPU..."
+  # The upstream Linux requirements intentionally pull CUDA ONNX/TensorRT and
+  # CUDA PyTorch wheels. For a CPU-only Emergent container we retain the common
+  # inference dependencies and replace those packages with CPU builds.
+  grep -Ev '^(--extra-index-url|deepspeed==|onnxruntime-gpu==|tensorrt-cu12|torch==|torchaudio==)' \
+    "${COSY_REPO}/requirements.txt" > "${CPU_REQUIREMENTS}"
+  "${VENV_DIR}/bin/python" -m pip install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.3.1 torchaudio==2.3.1
+  "${VENV_DIR}/bin/python" -m pip install onnxruntime==1.18.0
+  "${VENV_DIR}/bin/python" -m pip install -r "${CPU_REQUIREMENTS}"
+fi
+
 "${VENV_DIR}/bin/python" -m pip install "huggingface_hub>=0.27,<1"
 
 echo "[JARVIS] Scarico/aggiorno Fun-CosyVoice3-0.5B-2512..."
@@ -127,10 +139,16 @@ print("[JARVIS] Modello pronto: ${MODEL_DIR}")
 PY
 
 if command -v supervisorctl >/dev/null 2>&1; then
+  supervisorctl reread || true
+  supervisorctl update || true
   supervisorctl restart jarvis-cosyvoice || true
 fi
 
 echo
 echo "[JARVIS] Setup completato."
-echo "[JARVIS] Campione voce atteso in: ${VOICE_DIR}/jarvis.wav"
-echo "[JARVIS] Trascrizione attesa in: ${VOICE_DIR}/jarvis.txt"
+echo "[JARVIS] Modalità: $([[ "${GPU_AVAILABLE}" == "1" ]] && echo GPU || echo CPU)"
+echo "[JARVIS] Campione voce: ${VOICE_DIR}/jarvis.wav"
+echo "[JARVIS] Trascrizione: ${VOICE_DIR}/jarvis.txt"
+if [[ ! -s "${VOICE_DIR}/jarvis.txt" ]]; then
+  echo "[JARVIS] ATTENZIONE: jarvis.txt manca ancora. Crealo prima del test vocale."
+fi
