@@ -9,11 +9,23 @@ JARVIS è un assistente locale per Windows progettato per usare modelli caricati
 - Rilevamento automatico del primo modello caricato tramite `/v1/models`.
 - Agent loop con tool calling reale.
 - Stati interni: `IDLE`, `THINKING`, `EXECUTING`, `SPEAKING`, `ERROR`.
-- Tool reali: CPU, RAM, informazioni sistema e apertura applicazioni Windows.
 - Memoria locale SQLite con recupero contestuale.
 - La memoria automatica evita intenzionalmente password, PIN, carte, API key e altri dati sensibili evidenti.
+- Flusso reale di conferma: strumenti delicati vengono eseguiti solo dopo una risposta esplicita come `confermo`.
 - API FastAPI e CLI testuale.
 - Nessuna API AI a pagamento obbligatoria.
+
+### Tool desktop già integrati
+- CPU, RAM, disco e informazioni sistema;
+- apertura applicazioni Windows;
+- elenco e focus finestre;
+- OCR del testo visibile sullo schermo con coordinate;
+- ricerca di testo/pulsanti sullo schermo;
+- scroll;
+- lettura/impostazione volume;
+- timer e notifiche;
+- mouse, click, tastiera, screenshot e clipboard dietro conferma esplicita;
+- lock, sleep, restart e shutdown dietro conferma esplicita.
 
 ### JARVIS Particle UI
 Il frontend React usa un renderer **WebGL2** con circa 28.000 particelle:
@@ -36,9 +48,10 @@ Il frontend React usa un renderer **WebGL2** con circa 28.000 particelle:
 - lingua STT predefinita: italiano;
 - fallback automatico Whisper da CUDA a CPU;
 - registrazione fino al silenzio;
-- **Kokoro TTS** locale, caricato solo quando serve;
+- **Kokoro TTS** locale;
+- voce italiana maschile predefinita: `im_nicola`, `lang_code=i`;
 - runtime desktop unico in `jarvis/desktop.py`;
-- dipendenze voce separate in `requirements-local.txt`, quindi Emergent non deve installarle.
+- dipendenze voce/desktop separate in `requirements-local.txt`, quindi Emergent non deve installarle.
 
 > Emergent serve per sviluppare e vedere la UI. Wake word, microfono di sistema, controllo desktop, LM Studio e TTS devono girare sul PC Windows locale.
 
@@ -54,30 +67,32 @@ Il frontend rimane in `/frontend`, il backend Emergent in `/backend`, mentre il 
 
 ## Installazione completa su Windows
 
-Apri PowerShell nella cartella del progetto:
+La via più semplice è:
+
+```powershell
+.\run-local.ps1
+```
+
+Lo script:
+1. crea `.venv` se necessario;
+2. installa `requirements-local.txt`;
+3. scarica i modelli openWakeWord;
+4. crea `.env` da `.env.example` se manca;
+5. avvia il runtime desktop locale.
+
+Prima di lanciarlo:
+1. apri LM Studio;
+2. carica un modello;
+3. avvia il server locale sulla porta `1234`.
+
+Avvio manuale equivalente:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements-local.txt
-```
-
-Poi:
-
-1. Apri LM Studio.
-2. Carica un modello.
-3. Avvia il server locale sulla porta `1234`.
-4. Copia `.env.example` in `.env`.
-5. Abilita il runtime voce:
-
-```env
-JARVIS_VOICE_ENABLED=true
-```
-
-Avvia il Jarvis desktop completo:
-
-```powershell
+python -c "from openwakeword import utils; utils.download_models()"
 python -m jarvis.desktop
 ```
 
@@ -124,9 +139,9 @@ JARVIS_STT_COMPUTE_TYPE=int8
 JARVIS_STT_LANGUAGE=it
 
 JARVIS_TTS_ENABLED=true
-JARVIS_TTS_VOICE=af_heart
+JARVIS_TTS_VOICE=im_nicola
 JARVIS_TTS_SPEED=1.05
-JARVIS_TTS_LANG_CODE=a
+JARVIS_TTS_LANG_CODE=i
 ```
 
 Lasciando `JARVIS_MODEL` vuoto, JARVIS usa automaticamente il primo modello restituito da LM Studio.
@@ -202,11 +217,10 @@ DELETE /api/memory/ID
 - caricamento/scaricamento intelligente per non saturare VRAM e RAM.
 
 ### Desktop / Agent
-- screen vision;
-- mouse e tastiera controllati tramite policy;
-- browser agent;
+- browser agent più evoluto;
+- web search locale/gratuita;
 - Git / GitHub / VS Code;
-- volume e media control;
+- media control;
 - skill e routine;
 - barge-in: interrompere Jarvis mentre parla;
 - sincronizzazione dell'audio TTS con il core WebGL.
