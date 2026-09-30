@@ -26,12 +26,14 @@ class WakeWordListener:
         chunk_size: int = 1280,
         sample_rate: int = 16000,
         context_seconds: float = 30.0,
+        input_device: str | int | None = None,
     ) -> None:
         self.model_name = model_name
         self.threshold = threshold
         self.chunk_size = chunk_size
         self.sample_rate = sample_rate
         self.context_seconds = max(2.0, context_seconds)
+        self.input_device = input_device
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._stream_released = threading.Event()
@@ -56,9 +58,6 @@ class WakeWordListener:
 
     def pause(self) -> None:
         self._pause.set()
-        # Wait for the RawInputStream context to close before STT opens the same
-        # Windows microphone. The stream reads 80 ms chunks, so one second is
-        # ample without adding noticeable latency in the normal path.
         self._stream_released.wait(timeout=1.0)
 
     def resume(self) -> None:
@@ -146,15 +145,27 @@ class WakeWordListener:
         speech_rms_gate = 0.008
 
         try:
-            default_input = sd.query_devices(kind="input")
-            if default_input:
+            if self.input_device not in (None, ""):
+                selected_input = sd.query_devices(self.input_device, "input")
+            else:
+                selected_input = sd.query_devices(kind="input")
+            if selected_input:
                 print(
                     "[JARVIS] Microfono: "
-                    f"{default_input.get('name', 'input predefinito')} · "
-                    f"{default_input.get('default_samplerate', self.sample_rate):.0f} Hz"
+                    f"{selected_input.get('name', 'input predefinito')} · "
+                    f"{selected_input.get('default_samplerate', self.sample_rate):.0f} Hz"
                 )
         except Exception as exc:
-            print(f"[JARVIS] Microfono predefinito non identificato: {exc}")
+            print(f"[JARVIS] Microfono non identificato: {exc}")
+
+        stream_kwargs: dict[str, Any] = {
+            "samplerate": self.sample_rate,
+            "blocksize": self.chunk_size,
+            "channels": 1,
+            "dtype": "int16",
+        }
+        if self.input_device not in (None, ""):
+            stream_kwargs["device"] = self.input_device
 
         while not self._stop.is_set():
             if self._pause.is_set():
@@ -164,12 +175,7 @@ class WakeWordListener:
 
             self._stream_released.clear()
             try:
-                with sd.RawInputStream(
-                    samplerate=self.sample_rate,
-                    blocksize=self.chunk_size,
-                    channels=1,
-                    dtype="int16",
-                ) as stream:
+                with sd.RawInputStream(**stream_kwargs) as stream:
                     while not self._stop.is_set() and not self._pause.is_set():
                         data, overflowed = stream.read(self.chunk_size)
                         if overflowed:
@@ -231,8 +237,6 @@ class WakeWordListener:
                             name="jarvis-wake-callback",
                         ).start()
             finally:
-                # Leaving the stream context here truly releases the input
-                # device, allowing STT to open it exclusively on Windows.
                 self._stream_released.set()
 
             if self._pause.is_set():
