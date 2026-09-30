@@ -18,6 +18,7 @@ from jarvis.core.state import JarvisState
 from jarvis.memory import LocalMemory
 from jarvis.tools.defaults import build_default_registry
 from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
+from jarvis.voice.edge_cloud import EdgeCloudTTS, EdgeTTSError
 from jarvis.voice.fish_s2 import FishS2CloudTTS, FishS2Error
 
 settings = get_settings()
@@ -26,6 +27,8 @@ settings = get_settings()
 def _build_brain_client():
     if settings.brain_mode.strip().lower() == "cloud":
         return CloudAIClient(
+            zai_api_key=settings.zai_api_key,
+            zai_model=settings.zai_model,
             groq_api_key=settings.groq_api_key,
             openrouter_api_key=settings.openrouter_api_key,
             groq_model=settings.groq_model,
@@ -41,11 +44,19 @@ client = _build_brain_client()
 registry = build_default_registry()
 orchestrator: JarvisOrchestrator | None = None
 cloud_tts: FishS2CloudTTS | None = None
+edge_tts_fallback: EdgeCloudTTS | None = None
 if settings.cloud_tts_enabled and settings.cloud_tts_provider.strip().lower() == "fish-s2-pro":
     cloud_tts = FishS2CloudTTS(
         space_id=settings.fish_s2_space,
         hf_token=settings.fish_s2_hf_token,
         style_prompt=settings.fish_s2_style_prompt,
+    )
+if settings.cloud_tts_enabled and settings.cloud_tts_fallback_enabled:
+    edge_tts_fallback = EdgeCloudTTS(
+        voice=settings.edge_tts_voice,
+        rate=settings.edge_tts_rate,
+        pitch=settings.edge_tts_pitch,
+        volume=settings.edge_tts_volume,
     )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -53,7 +64,7 @@ LEGACY_WEB_DIR = Path(__file__).parent / "web"
 FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
 FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.7.0")
+app = FastAPI(title="JARVIS", version="0.8.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -115,9 +126,11 @@ def _brain_status() -> dict[str, object]:
 
 
 def _cloud_tts_status() -> dict[str, object]:
-    if cloud_tts is None:
-        return {"enabled": False, "provider": ""}
-    return {"enabled": True, **cloud_tts.status()}
+    primary = {"enabled": False, "provider": ""}
+    if cloud_tts is not None:
+        primary = {"enabled": True, **cloud_tts.status()}
+    fallback = edge_tts_fallback.status() if edge_tts_fallback is not None else None
+    return {**primary, "fallback": fallback}
 
 
 @app.get("/")
@@ -292,7 +305,6 @@ def chat(request: ChatRequest) -> ChatResponse:
             model=str(active_status.get("active_model") or agent.model),
             reasoning=agent.reasoning_status(),
         )
-        # Browser TTS owns the speech lifecycle, so leave the shared runtime ready.
         agent.set_state(JarvisState.IDLE)
         return response
     except (CloudAIError, LMStudioError) as exc:
@@ -301,20 +313,40 @@ def chat(request: ChatRequest) -> ChatResponse:
 
 @app.post("/api/tts")
 def synthesize_tts(request: TTSRequest) -> Response:
-    if cloud_tts is None:
-        raise HTTPException(status_code=503, detail="Fish Audio S2 Pro non è abilitato.")
-    try:
-        audio = cloud_tts.synthesize(request.text)
-        return Response(
-            content=audio.data,
-            media_type=audio.media_type,
-            headers={
-                "Cache-Control": "no-store",
-                "X-JARVIS-TTS-Provider": audio.provider,
-            },
-        )
-    except FishS2Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    primary_error = ""
+    if cloud_tts is not None:
+        try:
+            audio = cloud_tts.synthesize(request.text)
+            return Response(
+                content=audio.data,
+                media_type=audio.media_type,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-JARVIS-TTS-Provider": audio.provider,
+                },
+            )
+        except FishS2Error as exc:
+            primary_error = str(exc)
+
+    if edge_tts_fallback is not None:
+        try:
+            audio = edge_tts_fallback.synthesize(request.text)
+            return Response(
+                content=audio.data,
+                media_type=audio.media_type,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-JARVIS-TTS-Provider": audio.provider,
+                    "X-JARVIS-TTS-Fallback": "1",
+                },
+            )
+        except EdgeTTSError as exc:
+            detail = f"Fish S2: {primary_error or 'non disponibile'} | Edge TTS: {exc}"
+            raise HTTPException(status_code=503, detail=detail) from exc
+
+    if primary_error:
+        raise HTTPException(status_code=503, detail=primary_error)
+    raise HTTPException(status_code=503, detail="Nessun motore vocale cloud è disponibile.")
 
 
 @app.post("/api/reset")
