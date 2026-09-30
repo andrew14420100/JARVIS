@@ -1,0 +1,8 @@
+-r requirements.txt
+
+# Lightweight always-on Windows microphone listener. The AI brain and tools stay
+# on Emergent; this environment only handles wake word, microphone and STT.
+faster-whisper>=1.1,<2
+openWakeWord>=0.6,<1
+sounddevice>=0.5,<1
+numpy>=1.26,<3
