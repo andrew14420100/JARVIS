@@ -95,14 +95,14 @@ class JarvisOrchestrator:
             return False
         return None
 
-    def _handle_pending_confirmation(self, text: str) -> str | None:
+    def _handle_pending_confirmation(self, text: str) -> tuple[bool, str | None]:
         pending = self.pending_confirmation
         if pending is None:
-            return None
+            return False, None
 
         intent = self._confirmation_intent(text)
         if intent is None:
-            return (
+            return True, (
                 f"È ancora in attesa di conferma l'azione '{pending.name}'. "
                 "Rispondi 'confermo' per eseguirla oppure 'annulla'."
             )
@@ -112,7 +112,7 @@ class JarvisOrchestrator:
             self.pending_confirmation = None
             self.messages.append({"role": "system", "content": f"L'utente ha annullato l'azione {pending.name}."})
             self.set_state(JarvisState.IDLE)
-            return "Operazione annullata."
+            return True, "Operazione annullata."
 
         self.set_state(JarvisState.EXECUTING)
         try:
@@ -130,15 +130,14 @@ class JarvisOrchestrator:
             }
         )
         self.set_state(JarvisState.THINKING)
-        return None
+        return True, None
 
     def process_message(self, text: str) -> str:
-        pending_response = self._handle_pending_confirmation(text)
+        confirmation_consumed, pending_response = self._handle_pending_confirmation(text)
         if pending_response is not None:
             return pending_response
 
-        # If there was no pending confirmation, this is a normal new user turn.
-        if not self.messages or self.messages[-1].get("role") != "user" or self.messages[-1].get("content") != text:
+        if not confirmation_consumed:
             self.messages.append({"role": "user", "content": text})
         self.set_state(JarvisState.THINKING)
 
@@ -194,7 +193,6 @@ class JarvisOrchestrator:
 
                 self.set_state(JarvisState.THINKING)
                 if confirmation_requested:
-                    # Let the model explain what needs confirmation, but never execute it yet.
                     assistant_message = self.client.chat_completion(
                         model=self.model,
                         messages=self._messages_with_memory(text),
