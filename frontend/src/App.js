@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import JarvisCore, { WEBGL_PARTICLE_COUNT } from './JarvisCore';
+import JarvisCore from './JarvisCore';
 
 const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
+const WEBGL_PARTICLE_COUNT = 28000;
 
 function averageBand(data, from, to) {
   let total = 0;
