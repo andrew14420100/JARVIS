@@ -160,10 +160,37 @@ class CloudAIClient:
         return providers[0].model
 
     @staticmethod
-    def _is_agentic_request(tools: list[dict[str, Any]] | None) -> bool:
-        # Normal greetings and conversational turns should be immediate. Requests
-        # that expose tools are allowed to use Nemotron's deeper thinking mode.
-        return bool(tools)
+    def _latest_user_text(messages: list[dict[str, Any]]) -> str:
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                return str(message.get("content") or "").strip().lower()
+        return ""
+
+    @classmethod
+    def _is_agentic_request(
+        cls,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> bool:
+        """Use deep thinking only when the actual turn benefits from it.
+
+        Tools may stay available on every turn so Nemotron can still open apps or
+        inspect the PC. Their mere presence must not force expensive reasoning for
+        a greeting or a short conversational reply.
+        """
+        if not tools:
+            return False
+        text = cls._latest_user_text(messages)
+        words = text.split()
+        if len(words) >= 20:
+            return True
+        deep_markers = (
+            "analizza", "debug", "correggi", "progetta", "pianifica",
+            "confronta", "ottimizza", "investiga", "diagnostica",
+            "architettura", "implementa", "multi-step", "passaggi",
+            "ragiona", "strategia", "verifica e correggi", "testa e",
+        )
+        return any(marker in text for marker in deep_markers)
 
     def chat_completion(
         self,
@@ -186,7 +213,7 @@ class CloudAIClient:
                 payload.update(provider.extra_body)
             if provider.supports_dynamic_thinking:
                 payload["chat_template_kwargs"] = {
-                    "enable_thinking": self._is_agentic_request(tools)
+                    "enable_thinking": self._is_agentic_request(messages, tools)
                 }
             if tools:
                 payload["tools"] = tools
