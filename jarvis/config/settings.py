@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     """Runtime configuration for JARVIS.
 
     Values can be overridden with environment variables prefixed by JARVIS_.
-    The heavy local voice stack is optional and disabled in cloud previews.
+    The heavy local voice/cognitive stack is optional and disabled in cloud previews.
     """
 
     lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
@@ -17,9 +17,23 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 120.0
     user_name: str = "Signore"
 
+    # Hybrid reasoning. OpenJarvis is loaded only on the local desktop runtime.
+    openjarvis_enabled: bool = False
+    openjarvis_agent: str = "orchestrator"
+    openjarvis_model: str = ""
+    deep_reasoning_enabled: bool = True
+    deep_reasoning_min_score: int = 4
+
     memory_enabled: bool = True
     memory_db_path: str = "data/jarvis_memory.sqlite3"
     memory_top_k: int = 4
+
+    # Presence context: a short-lived local context window inspired by
+    # always-present assistants. Ambient audio itself is never persisted.
+    presence_enabled: bool = False
+    presence_context_seconds: float = 30.0
+    presence_max_items: int = 12
+    presence_max_chars: int = 5000
 
     voice_enabled: bool = False
     wake_model: str = "hey_jarvis"
