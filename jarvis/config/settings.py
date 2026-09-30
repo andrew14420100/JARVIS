@@ -59,7 +59,8 @@ class Settings(BaseSettings):
 
     stt_model: str = "small"
     stt_device: str = "auto"
-    stt_compute_type: str = "int8"
+    # RTX-class CUDA GPUs are considerably faster with float16 than plain int8.
+    stt_compute_type: str = "float16"
     stt_language: str = "it"
 
     browser_voice_input_enabled: bool = False
