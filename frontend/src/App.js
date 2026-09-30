@@ -33,6 +33,8 @@ export default function App() {
   const [model, setModel] = useState('LOCAL CORE');
   const [clock, setClock] = useState('00:00:00');
   const [micActive, setMicActive] = useState(false);
+  const [localVoiceActive, setLocalVoiceActive] = useState(false);
+  const [localRuntimeState, setLocalRuntimeState] = useState('IDLE');
   const [audioLevel, setAudioLevel] = useState(0);
   const [bootVisible, setBootVisible] = useState(true);
 
@@ -44,6 +46,7 @@ export default function App() {
   const analyserRef = useRef(null);
   const audioDataRef = useRef(null);
   const micRafRef = useRef(0);
+  const runtimePauseUntilRef = useRef(0);
 
   const particleCount = WEBGL_PARTICLE_COUNT.toLocaleString('it-IT');
 
@@ -77,6 +80,50 @@ export default function App() {
       clearInterval(timer);
       clearInterval(healthTimer);
       clearTimeout(bootTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const syncRuntimeState = async () => {
+      if (disposed || mediaStreamRef.current || Date.now() < runtimePauseUntilRef.current) return;
+      try {
+        const response = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        const voiceEnabled = Boolean(data.voice_enabled);
+        const next = String(data.state || 'IDLE').toUpperCase();
+        setLocalVoiceActive(voiceEnabled);
+        setLocalRuntimeState(next);
+
+        if (!voiceEnabled) return;
+        visualStateRef.current = next;
+        setMode(next);
+
+        if (data.pending_confirmation) {
+          setHint(`Conferma richiesta per: ${data.pending_confirmation}. Di' “confermo” oppure “annulla”.`);
+        } else if (next === 'LISTENING') {
+          setHint('Wake word rilevata — Jarvis ti sta ascoltando.');
+        } else if (next === 'THINKING') {
+          setHint('Jarvis sta elaborando la richiesta con il modello locale…');
+        } else if (next === 'EXECUTING') {
+          setHint('Jarvis sta usando uno strumento locale…');
+        } else if (next === 'SPEAKING') {
+          setHint('Jarvis sta rispondendo.');
+        } else if (next === 'IDLE') {
+          setHint('Di’ “Hey Jarvis” oppure scrivi una richiesta.');
+        }
+      } catch {
+        // Runtime sync is optional; health status already reports backend failures.
+      }
+    };
+
+    syncRuntimeState();
+    const stateTimer = setInterval(syncRuntimeState, 300);
+    return () => {
+      disposed = true;
+      clearInterval(stateTimer);
     };
   }, []);
 
@@ -126,7 +173,7 @@ export default function App() {
     audioBandsRef.current = { bass: 0, mid: 0, high: 0 };
     setAudioLevel(0);
     setMicActive(false);
-    setHint('Premi il microfono: il core reagirà in tempo reale alla tua voce.');
+    setHint(localVoiceActive ? 'Di’ “Hey Jarvis” oppure scrivi una richiesta.' : 'Premi il microfono: il core reagirà in tempo reale alla tua voce.');
     changeMode('IDLE');
   };
 
@@ -173,6 +220,7 @@ export default function App() {
     const text = message.trim();
     if (!text) return;
 
+    runtimePauseUntilRef.current = Date.now() + 15000;
     setMessage('');
     setReply('');
     setHint('Elaborazione della richiesta…');
@@ -191,19 +239,27 @@ export default function App() {
       if (data.model) setModel(data.model);
       changeMode(data.state || 'SPEAKING');
       setHint('Risposta completata.');
+      runtimePauseUntilRef.current = Date.now() + 2300;
 
       setTimeout(() => {
         if (!mediaStreamRef.current) {
           changeMode('IDLE');
-          setHint('Premi il microfono: il core reagirà in tempo reale alla tua voce.');
+          setHint(localVoiceActive ? 'Di’ “Hey Jarvis” oppure scrivi una richiesta.' : 'Premi il microfono: il core reagirà in tempo reale alla tua voce.');
         }
       }, 2200);
     } catch (error) {
+      runtimePauseUntilRef.current = Date.now() + 2300;
       setReply(error.message);
       setHint('Il backend è online, ma il modello locale non è ancora collegato.');
       changeMode('ERROR');
     }
   };
+
+  const voiceLink = micActive
+    ? 'BROWSER LIVE'
+    : localVoiceActive
+      ? (localRuntimeState === 'IDLE' ? 'LOCAL READY' : localRuntimeState)
+      : 'STANDBY';
 
   return (
     <div className="jarvis-app">
@@ -243,7 +299,7 @@ export default function App() {
         <div className="side right">
           <Metric label="CORE STABILITY" value="99.8%" />
           <Metric label="RENDER LOOP" value="WEBGL2" />
-          <Metric label="VOICE LINK" value={micActive ? 'LIVE' : 'STANDBY'} />
+          <Metric label="VOICE LINK" value={voiceLink} />
         </div>
 
         <div className="center-ui">
