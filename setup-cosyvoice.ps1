@@ -75,9 +75,6 @@ Write-Host "[3/5] Installo dipendenze CosyVoice nell'ambiente separato..."
 & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install --upgrade pip
 Assert-LastExit "Aggiornamento pip CosyVoice"
 
-# OmegaConf/Hydra richiedono ANTLR 4.9.x. Su PyPI la 4.9.3 e' solo una
-# source distribution e il suo wheel build storico fallisce su Windows cercando
-# bin\pygrun. Conda-forge pubblica invece un pacchetto noarch pronto all'uso.
 Write-Host "  - Installo ANTLR 4.9.3 precompilato da conda-forge (workaround Windows)..."
 & $condaExe install -n jarvis-cosyvoice -y --override-channels -c conda-forge "antlr4-python3-runtime=4.9.3"
 Assert-LastExit "Installazione ANTLR 4.9.3 da conda-forge"
@@ -85,11 +82,6 @@ Assert-LastExit "Installazione ANTLR 4.9.3 da conda-forge"
 & $condaExe run --no-capture-output -n jarvis-cosyvoice python -c "import antlr4; print('ANTLR runtime OK')"
 Assert-LastExit "Verifica ANTLR runtime"
 
-# openai-whisper==20231117 (ancora richiesto dal repository ufficiale CosyVoice)
-# usa pkg_resources durante il build. Con i tool di build moderni e build
-# isolation su Windows può fallire con ModuleNotFoundError: pkg_resources.
-# Manteniamo quindi un setuptools che fornisce pkg_resources e installiamo
-# Whisper separatamente senza build isolation.
 Write-Host "  - Preparo tool di build compatibili con Whisper 20231117..."
 & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install "setuptools<81" wheel setuptools-rust
 Assert-LastExit "Installazione tool build Whisper"
@@ -113,6 +105,31 @@ try {
     Assert-LastExit "Installazione openai-whisper"
 } finally {
     Remove-Item -LiteralPath $tempRequirements -Force -ErrorAction SilentlyContinue
+}
+
+# CosyVoice currently pins torch 2.3.1+cu121, which predates NVIDIA Blackwell.
+# RTX 50-series GPUs (sm_120) require a PyTorch CUDA 12.8+ build. PyTorch
+# 2.7.1/cu128 is close enough to CosyVoice's dependency era while supporting
+# Blackwell on Windows, so override only on RTX 50-series systems.
+$gpuName = ""
+$nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+if ($nvidiaSmi) {
+    try {
+        $gpuName = ((& $nvidiaSmi.Source --query-gpu=name --format=csv,noheader | Select-Object -First 1) -as [string]).Trim()
+    } catch {
+        $gpuName = ""
+    }
+}
+
+if ($gpuName -match 'RTX\s*50') {
+    Write-Host "  - Rilevata $gpuName: aggiorno PyTorch/Torchaudio per Blackwell (CUDA 12.8)..." -ForegroundColor Cyan
+    & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install --upgrade --force-reinstall "torch==2.7.1" "torchaudio==2.7.1" --index-url https://download.pytorch.org/whl/cu128
+    Assert-LastExit "Installazione PyTorch 2.7.1 CUDA 12.8 per RTX 50"
+
+    & $condaExe run --no-capture-output -n jarvis-cosyvoice python -c "import torch; print('Torch', torch.__version__, 'CUDA', torch.version.cuda, 'GPU', torch.cuda.get_device_name(0), 'capability', torch.cuda.get_device_capability(0)); assert torch.cuda.is_available(); assert torch.cuda.get_device_capability(0)[0] >= 12"
+    Assert-LastExit "Verifica supporto Blackwell PyTorch"
+} elseif ($gpuName) {
+    Write-Host "  - GPU rilevata: $gpuName. Mantengo la build Torch richiesta da CosyVoice."
 }
 
 Write-Host "  - Abilito download Hugging Face ottimizzati (hf_xet)..."
