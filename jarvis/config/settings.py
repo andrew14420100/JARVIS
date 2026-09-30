@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     cloud_app_name: str = "JARVIS"
     cloud_app_url: str = ""
 
+    # Local Qwen in LM Studio can act as an offline fallback for cloud mode.
     lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
+    lm_studio_fallback_enabled: bool = True
 
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
