@@ -9,6 +9,8 @@ import uvicorn
 from jarvis.app import app, get_orchestrator
 from jarvis.config.settings import get_settings
 from jarvis.core.state import JarvisState
+from jarvis.core.events import EventBus, JarvisEvent
+from jarvis.core.router import JarvisRouter
 from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
@@ -106,19 +108,24 @@ def main() -> None:
         print(f"[STT] Warm-up non riuscito: {exc}. Verra' ritentato al primo comando.")
 
     busy = threading.Event()
-    agent = get_orchestrator()
 
-    def acoustic_guard() -> None:
+agent = get_orchestrator()
+
+# JARVIS CORE ENGINE
+event_bus = EventBus()
+router = JarvisRouter()
+
+def acoustic_guard() -> None:
         time.sleep(ACOUSTIC_GUARD_SECONDS)
 
-    def interrupt() -> None:
+def interrupt() -> None:
         stt.abort()
         if tts_ready:
             tts.stop()
         agent.set_state(JarvisState.IDLE)
         busy.clear()
 
-    def capture_turn(
+def capture_turn(
         *,
         initial_silence_seconds: float,
         max_seconds: float,
@@ -178,26 +185,54 @@ def main() -> None:
         )
         return text
 
-    def answer_turn(text: str, ambient_context: str = "") -> str:
-        print(f"TU: {text}")
-        brain_started = time.monotonic()
-        reply = agent.process_message(text, ambient_context=ambient_context)
-        brain_seconds = time.monotonic() - brain_started
-        presence.add(text, speaker="utente")
-        if reply:
-            presence.add(reply, speaker="Jarvis")
-        print(f"JARVIS: {reply}")
-        print(f"[LATENCY] cervello={brain_seconds:.2f}s")
+def answer_turn(text: str, ambient_context: str = "") -> str:
+    print(f"TU: {text}")
 
-        reasoning = agent.reasoning_status()
-        if reasoning.get("used_openjarvis"):
+    # -----------------------------
+    # JARVIS CORE ROUTER
+    # -----------------------------
+
+    intent = router.classify(text)
+
+    event_bus.emit(
+        JarvisEvent(
+            "USER_COMMAND",
+            {
+                "text": text,
+                "intent": intent
+            }
+        )
+    )
+
+    print(f"[CORE] Intent rilevato: {intent}")
+
+
+    # -----------------------------
+    # BRAIN ENGINE ESISTENTE
+    # -----------------------------
+
+    brain_started = time.monotonic()
+
+    reply = agent.process_message(
+        text,
+        ambient_context=ambient_context
+    )
+    brain_seconds = time.monotonic() - brain_started
+    presence.add(text, speaker="utente")
+    if reply:
+            presence.add(reply, speaker="Jarvis")
+    print(f"JARVIS: {reply}")
+    print(f"[LATENCY] cervello={brain_seconds:.2f}s")
+
+    reasoning = agent.reasoning_status()
+    if reasoning.get("used_openjarvis"):
             print(
                 "[COGNITIVE] OpenJarvis "
                 f"agent={reasoning.get('agent')} model={reasoning.get('model')} "
                 f"score={reasoning.get('score')}"
             )
 
-        if settings.tts_enabled and tts_ready and reply:
+    if settings.tts_enabled and tts_ready and reply:
             try:
                 agent.set_state(JarvisState.SPEAKING)
                 tts_started = time.monotonic()
@@ -206,7 +241,7 @@ def main() -> None:
                 acoustic_guard()
             except Exception as exc:
                 print(f"[JARVIS] TTS non disponibile: {exc}")
-        return reply
+    return reply
 
     def handle_wake() -> None:
         if busy.is_set():
