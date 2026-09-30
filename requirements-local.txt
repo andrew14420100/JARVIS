@@ -7,3 +7,5 @@ openWakeWord>=0.6,<1
 kokoro>=0.9,<1
 sounddevice>=0.5,<1
 numpy>=1.26,<3
+pyautogui>=0.9,<1
+pillow>=10,<13
