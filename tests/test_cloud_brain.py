@@ -14,14 +14,61 @@ def test_rejects_paid_openrouter_model():
         )
 
 
-def test_falls_back_from_groq_to_openrouter_free():
+def test_rejects_unlisted_nvidia_model():
+    with pytest.raises(CloudAIError):
+        CloudAIClient(
+            nvidia_api_key="test-key",
+            nvidia_model="nvidia/not-a-free-model",
+        )
+
+
+def test_prefers_nemotron_and_enables_thinking_for_agentic_calls():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            payload = json.loads(request.content.decode("utf-8"))
+            seen.append(payload)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "nemotron ok"}}
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"data": []})
+
+    client = CloudAIClient(
+        nvidia_api_key="nvapi-test",
+        zai_api_key="zai-test",
+        groq_api_key="groq-test",
+    )
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    message = client.chat_completion(
+        model="nvidia/nemotron-3-ultra-550b-a55b",
+        messages=[{"role": "user", "content": "esegui un compito"}],
+        tools=[{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}],
+    )
+
+    assert message["content"] == "nemotron ok"
+    assert seen[0]["model"] == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert seen[0]["chat_template_kwargs"]["enable_thinking"] is True
+    assert client.status()["active_provider"] == "nvidia-free"
+    assert client.status()["paid_fallback"] is False
+    client.close()
+
+
+def test_falls_back_from_nvidia_and_groq_to_openrouter_free():
     seen_models = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             payload = json.loads(request.content.decode("utf-8"))
             seen_models.append(payload["model"])
-            if request.url.host == "api.groq.com":
+            if request.url.host in {"integrate.api.nvidia.com", "api.groq.com"}:
                 return httpx.Response(429, json={"error": {"message": "quota"}})
             return httpx.Response(
                 200,
@@ -34,6 +81,7 @@ def test_falls_back_from_groq_to_openrouter_free():
         return httpx.Response(200, json={"data": []})
 
     client = CloudAIClient(
+        nvidia_api_key="nvapi-test",
         groq_api_key="groq-test",
         openrouter_api_key="router-test",
     )
@@ -41,15 +89,18 @@ def test_falls_back_from_groq_to_openrouter_free():
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
 
     message = client.chat_completion(
-        model="qwen/qwen3.8-27b",
+        model="nvidia/nemotron-3-ultra-550b-a55b",
         messages=[{"role": "user", "content": "ciao"}],
     )
 
     assert message["content"] == "fallback ok"
-    assert seen_models == ["qwen/qwen3.8-27b", "openrouter/free"]
+    assert seen_models == [
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "qwen/qwen3.8-27b",
+        "openrouter/free",
+    ]
     assert client.status()["active_provider"] == "openrouter-free"
     assert client.status()["paid_fallback"] is False
-
     client.close()
 
 
