@@ -64,21 +64,32 @@ class Settings(BaseSettings):
     stt_compute_type: str = "int8"
     stt_language: str = "it"
 
-    # Browser/cloud voice preview. Fish Audio S2 Pro remains the preferred
-    # natural voice. Edge Neural TTS is a no-key online fallback so JARVIS does
-    # not become silent when the public ZeroGPU Space is queued/unavailable.
-    cloud_tts_enabled: bool = True
+    # Voice mode. CosyVoice 3 runs locally in a separate Python 3.10 process,
+    # keeps the cloned speaker representation warm, and streams PCM back to
+    # JARVIS. No TTS API key, credits or per-minute quota are involved.
+    tts_mode: str = "cosyvoice-local"
+    cosyvoice_enabled: bool = True
+    cosyvoice_service_url: str = "http://127.0.0.1:8765"
+    cosyvoice_repo_dir: str = ".local/cosyvoice/CosyVoice"
+    cosyvoice_model_dir: str = ".local/cosyvoice/models/Fun-CosyVoice3-0.5B"
+    cosyvoice_reference_audio: str = "private/voices/jarvis.wav"
+    cosyvoice_reference_text: str = "private/voices/jarvis.txt"
+    cosyvoice_speed: float = 1.0
+
+    # Legacy browser/cloud TTS remains available only when TTS_MODE=cloud is
+    # explicitly selected. It is not part of the default JARVIS voice path.
+    cloud_tts_enabled: bool = False
     cloud_tts_provider: str = "fish-s2-pro"
     fish_s2_space: str = "artificialguybr/fish-s2-pro-zero"
     fish_s2_hf_token: str = ""
     fish_s2_style_prompt: str = "[low voice] [calm professional tone]"
-    cloud_tts_fallback_enabled: bool = True
+    cloud_tts_fallback_enabled: bool = False
     edge_tts_voice: str = "it-IT-GiuseppeMultilingualNeural"
     edge_tts_rate: str = "-8%"
     edge_tts_pitch: str = "-6Hz"
     edge_tts_volume: str = "+0%"
 
-    # Local desktop TTS remains available for the future native runtime.
+    # Legacy Kokoro configuration kept only as an optional local fallback.
     tts_enabled: bool = True
     tts_voice: str = "im_nicola"
     tts_speed: float = 1.05
