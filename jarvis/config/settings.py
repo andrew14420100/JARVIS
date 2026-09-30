@@ -19,8 +19,6 @@ class Settings(BaseSettings):
     user_name: str = "Signore"
 
     # Public cloud AI. Secrets stay server-side and are never sent to React.
-    # NVIDIA Nemotron 3 Ultra is preferred when configured; every provider in
-    # this router is constrained to a free endpoint/model id.
     nvidia_api_key: str = ""
     nvidia_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     zai_api_key: str = ""
@@ -32,11 +30,8 @@ class Settings(BaseSettings):
     cloud_app_name: str = "JARVIS"
     cloud_app_url: str = ""
 
-    # Optional legacy/local fallback for development only. It is not used when
-    # brain_mode=cloud and is never selected automatically by the cloud router.
     lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
 
-    # Hybrid reasoning. OpenJarvis remains optional; the main brain can be cloud.
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
     openjarvis_model: str = ""
@@ -47,17 +42,16 @@ class Settings(BaseSettings):
     memory_db_path: str = "data/jarvis_memory.sqlite3"
     memory_top_k: int = 4
 
-    # Presence context: a short-lived local context window inspired by
-    # always-present assistants. Ambient audio itself is never persisted.
     presence_enabled: bool = False
     presence_context_seconds: float = 30.0
     presence_max_items: int = 12
     presence_max_chars: int = 5000
 
     voice_enabled: bool = False
+    # Optional sounddevice input selector. Leave blank for the Windows default,
+    # or set an exact/unique device name such as "Microfono (USB ...)".
+    audio_input_device: str = ""
     wake_model: str = "hey_jarvis"
-    # The stock model is trained for "hey jarvis", but a slightly more
-    # sensitive threshold makes the shorter "Jarvis" invocation practical.
     wake_threshold: float = 0.35
     wake_chunk_size: int = 1280
 
@@ -66,9 +60,6 @@ class Settings(BaseSettings):
     stt_compute_type: str = "int8"
     stt_language: str = "it"
 
-    # Siri-like local listener. The listener owns the Windows microphone and
-    # sends recognized turns to the JARVIS backend hosted on Emergent. Browser
-    # microphone capture is intentionally disabled by default.
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
     listener_followup_silence_seconds: float = 8.0
@@ -76,8 +67,6 @@ class Settings(BaseSettings):
     listener_wake_ack_enabled: bool = True
     listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
 
-    # Voice mode. CosyVoice 3 runs in a separate process, keeps the cloned
-    # speaker representation warm, and streams PCM back to JARVIS.
     tts_mode: str = "cosyvoice-local"
     cosyvoice_enabled: bool = True
     cosyvoice_service_url: str = "http://127.0.0.1:8765"
@@ -87,8 +76,6 @@ class Settings(BaseSettings):
     cosyvoice_reference_text: str = "private/voices/jarvis.txt"
     cosyvoice_speed: float = 1.0
 
-    # Legacy browser/cloud TTS remains available only when TTS_MODE=cloud is
-    # explicitly selected. It is not part of the default JARVIS voice path.
     cloud_tts_enabled: bool = False
     cloud_tts_provider: str = "fish-s2-pro"
     fish_s2_space: str = "artificialguybr/fish-s2-pro-zero"
@@ -100,7 +87,6 @@ class Settings(BaseSettings):
     edge_tts_pitch: str = "-6Hz"
     edge_tts_volume: str = "+0%"
 
-    # Legacy Kokoro configuration kept only as an optional local fallback.
     tts_enabled: bool = True
     tts_voice: str = "im_nicola"
     tts_speed: float = 1.05
