@@ -10,6 +10,9 @@ $python = ".\.venv\Scripts\python.exe"
 & $python -m pip install --upgrade pip
 & $python -m pip install -r requirements-local.txt
 
+Write-Host "Controllo modelli wake-word..."
+& $python -c "from openwakeword import utils; utils.download_models()"
+
 if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
     Copy-Item ".env.example" ".env"
     Write-Host "Creato .env da .env.example."
