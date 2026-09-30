@@ -12,11 +12,7 @@ class STTResult:
 
 
 class LocalSTT:
-    """Lazy faster-whisper wrapper with microphone VAD-style recording.
-
-    The module imports faster-whisper/sounddevice only when used so the normal
-    FastAPI/React preview stays lightweight.
-    """
+    """Lazy faster-whisper wrapper with microphone VAD-style recording."""
 
     def __init__(
         self,
@@ -37,6 +33,7 @@ class LocalSTT:
         self.last_recording_heard_speech = False
         self.last_recording_max_rms = 0.0
         self.last_recording_speech_threshold = 0.0
+        self.last_recording_gain = 1.0
 
     @staticmethod
     def dependency_status() -> dict[str, bool]:
@@ -85,40 +82,65 @@ class LocalSTT:
             beam_size=3,
             language=self.language or None,
             vad_filter=True,
+            initial_prompt="Conversazione in italiano con un assistente chiamato Jarvis. La parola di attivazione è Jarvis o Hey Jarvis.",
         )
         segments = list(segments)
         text = " ".join(segment.text.strip() for segment in segments).strip()
         detected = getattr(info, "language", None)
         return STTResult(text=text, language=detected)
 
+    def _normalize_audio(self, audio):
+        """Raise very quiet microphone captures without clipping.
+
+        Some Windows USB endpoints expose valid speech at RMS values below
+        0.001. Whisper works much better if that signal is normalized before its
+        internal VAD. Keep the gain bounded to avoid amplifying pure digital
+        silence or background hiss excessively.
+        """
+        import numpy as np
+
+        array = np.asarray(audio, dtype=np.float32)
+        if not array.size:
+            self.last_recording_gain = 1.0
+            return array
+        peak = float(np.max(np.abs(array)))
+        if peak <= 1e-6:
+            self.last_recording_gain = 1.0
+            return array
+        target_peak = 0.22
+        gain = min(24.0, max(1.0, target_peak / peak))
+        self.last_recording_gain = gain
+        if gain <= 1.01:
+            return array
+        return np.clip(array * gain, -1.0, 1.0).astype(np.float32, copy=False)
+
     def transcribe(self, audio, sample_rate: int = 16000) -> STTResult:
-        del sample_rate  # faster-whisper accepts the 16 kHz float array directly.
+        del sample_rate
+        normalized = self._normalize_audio(audio)
         model = self._load_model()
         try:
-            return self._transcribe_once(model, audio)
+            return self._transcribe_once(model, normalized)
         except Exception as exc:
             if self._model_device != "cpu":
                 print(f"[STT] GPU non disponibile ({exc}); fallback CPU.")
                 model = self._load_model(force_cpu=True)
-                return self._transcribe_once(model, audio)
+                return self._transcribe_once(model, normalized)
             raise
 
     def record_until_silence(
         self,
         sample_rate: int = 16000,
-        silence_threshold: float = 0.0025,
-        speech_threshold: float = 0.0045,
+        silence_threshold: float = 0.00028,
+        speech_threshold: float = 0.00055,
         silence_seconds: float = 0.75,
         max_seconds: float = 30.0,
         initial_silence_seconds: float | None = 6.0,
     ):
-        """Record one natural conversational turn.
+        """Record one natural conversational turn from a low-level Windows mic.
 
-        Use the same RawInputStream/int16 path as the wake-word listener. Some
-        Windows USB audio drivers can deliver valid data to a raw int16 stream
-        while returning zeros when the same endpoint is reopened as float32.
-        Converting the proven-good int16 PCM ourselves keeps wake and STT on an
-        identical capture path.
+        Wake-word detection has already proven that some user devices expose
+        speech around RMS 0.001, so use permissive thresholds here and let
+        Whisper's own VAD plus normalization perform the semantic filtering.
         """
         import numpy as np
         import sounddevice as sd
@@ -127,6 +149,7 @@ class LocalSTT:
         self.last_recording_heard_speech = False
         self.last_recording_max_rms = 0.0
         self.last_recording_speech_threshold = float(speech_threshold)
+        self.last_recording_gain = 1.0
 
         chunk_seconds = 0.16
         chunk = int(sample_rate * chunk_seconds)
