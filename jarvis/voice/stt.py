@@ -32,6 +32,7 @@ class LocalSTT:
         self._model: Any | None = None
         self._model_device: str | None = None
         self.abort_event = threading.Event()
+        self.last_recording_heard_speech = False
 
     @staticmethod
     def dependency_status() -> dict[str, bool]:
@@ -103,23 +104,36 @@ class LocalSTT:
         sample_rate: int = 16000,
         silence_threshold: float = 0.010,
         speech_threshold: float = 0.014,
-        silence_seconds: float = 1.25,
-        max_seconds: float = 30.0,
+        silence_seconds: float = 1.0,
+        max_seconds: float = 45.0,
+        initial_silence_seconds: float | None = None,
     ):
+        """Record one natural conversational turn.
+
+        Recording starts immediately, ends after speech followed by a short
+        silence, and can optionally time out if the user never begins speaking.
+        `last_recording_heard_speech` lets callers leave an active conversation
+        without wasting a Whisper pass on pure silence.
+        """
         import numpy as np
         import sounddevice as sd
 
         self.abort_event.clear()
-        chunk_seconds = 0.20
+        self.last_recording_heard_speech = False
+        chunk_seconds = 0.16
         chunk = int(sample_rate * chunk_seconds)
         silent_needed = max(1, int(silence_seconds / chunk_seconds))
         max_chunks = max(1, int(max_seconds / chunk_seconds))
+        initial_chunks = None
+        if initial_silence_seconds is not None:
+            initial_chunks = max(1, int(max(0.2, initial_silence_seconds) / chunk_seconds))
+
         silent_chunks = 0
         heard_speech = False
         recording: list[Any] = []
 
         with sd.InputStream(samplerate=sample_rate, channels=1, dtype="float32") as stream:
-            for _ in range(max_chunks):
+            for index in range(max_chunks):
                 if self.abort_event.is_set():
                     break
                 data, _overflowed = stream.read(chunk)
@@ -129,11 +143,14 @@ class LocalSTT:
 
                 if rms >= speech_threshold:
                     heard_speech = True
+                    self.last_recording_heard_speech = True
                     silent_chunks = 0
                 elif heard_speech and rms < silence_threshold:
                     silent_chunks += 1
 
                 if heard_speech and silent_chunks >= silent_needed:
+                    break
+                if not heard_speech and initial_chunks is not None and index + 1 >= initial_chunks:
                     break
 
         if not recording:
