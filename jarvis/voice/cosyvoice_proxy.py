@@ -26,9 +26,9 @@ class CosyVoiceAudio:
 class CosyVoiceProxyTTS:
     """Client for the warm CosyVoice 3 service running beside JARVIS.
 
-    Audio is consumed while CosyVoice is still generating it. A very small
-    PCM prebuffer absorbs inference jitter without forcing JARVIS to wait for
-    a complete sentence before it starts speaking.
+    The voice starts from a short first phrase, then the remaining phrases are
+    synthesized ahead of playback. This keeps time-to-first-audio low while
+    preserving continuous, natural speech on longer answers.
     """
 
     def __init__(
@@ -106,6 +106,7 @@ class CosyVoiceProxyTTS:
                 "sample_rate": int(health.get("sample_rate") or self._sample_rate),
                 "model": health.get("model") or "Fun-CosyVoice3-0.5B-2512",
                 "device": health.get("device") or "unknown",
+                "precision": health.get("precision") or "unknown",
                 "reference_voice_configured": bool(health.get("reference_voice_configured")),
                 "speaker_cached": bool(health.get("speaker_cached")),
                 "model_warm": bool(health.get("model_warm")),
@@ -135,8 +136,11 @@ class CosyVoiceProxyTTS:
 
     @staticmethod
     def _clean_for_speech(text: str) -> str:
-        """Remove Markdown/control punctuation that should not be spoken."""
+        """Strip non-spoken markup, including accidental model tool syntax."""
         clean = str(text or "")
+        clean = re.sub(r"<invoke\b[^>]*>.*?</invoke>", "", clean, flags=re.IGNORECASE | re.DOTALL)
+        clean = re.sub(r"<tool_call\b[^>]*>.*?</tool_call>", "", clean, flags=re.IGNORECASE | re.DOTALL)
+        clean = re.sub(r"<parameter\b[^>]*>.*?</parameter>", "", clean, flags=re.IGNORECASE | re.DOTALL)
         clean = re.sub(r"```(?:[\w.+-]+)?\s*", "", clean)
         clean = clean.replace("```", "")
         clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean)
@@ -144,7 +148,46 @@ class CosyVoiceProxyTTS:
         clean = re.sub(r"(?m)^\s*[-*+]\s+", "", clean)
         clean = re.sub(r"(?m)^\s*\d+[.)]\s+", "", clean)
         clean = re.sub(r"[*_~`]+", "", clean)
+        clean = re.sub(r"<[^>]+>", "", clean)
         return " ".join(clean.strip().split())
+
+    @staticmethod
+    def _speech_segments(text: str) -> list[str]:
+        """Split speech so the first phrase can be spoken almost immediately."""
+        clean = " ".join(str(text or "").strip().split())
+        if not clean:
+            return []
+
+        rough = [part.strip() for part in re.split(r"(?<=[.!?;:,])\s+", clean) if part.strip()]
+        if not rough:
+            rough = [clean]
+
+        segments: list[str] = []
+        for index, part in enumerate(rough):
+            # The first utterance is deliberately short. Later chunks may be a
+            # little longer because they are synthesized while audio is playing.
+            limit = 46 if not segments else 82
+            while len(part) > limit:
+                cut = part.rfind(" ", 0, limit + 1)
+                if cut < max(18, limit // 2):
+                    cut = limit
+                piece = part[:cut].strip(" ,")
+                if piece:
+                    segments.append(piece)
+                part = part[cut:].strip(" ,")
+                limit = 82
+            if part:
+                segments.append(part)
+
+        # Avoid tiny fragments that sound choppy. Merge them forward/backward
+        # while preserving a short first phrase whenever possible.
+        merged: list[str] = []
+        for segment in segments:
+            if merged and len(segment) < 12 and len(merged[-1]) + len(segment) + 1 <= 82:
+                merged[-1] = f"{merged[-1]} {segment}".strip()
+            else:
+                merged.append(segment)
+        return merged
 
     def stream_pcm(self, text: str) -> Iterator[bytes]:
         clean = self._clean_for_speech(text)
@@ -175,7 +218,8 @@ class CosyVoiceProxyTTS:
 
     def synthesize(self, text: str) -> CosyVoiceAudio:
         self._interrupt.clear()
-        pcm = b"".join(self.stream_pcm(text))
+        clean = self._clean_for_speech(text)
+        pcm = b"".join(self.stream_pcm(clean))
         if not pcm:
             raise CosyVoiceProxyError("CosyVoice non ha restituito audio.")
         if len(pcm) % 2:
@@ -192,7 +236,8 @@ class CosyVoiceProxyTTS:
     def speak(self, text: str, streamed: bool = True) -> None:
         del streamed
         clean = self._clean_for_speech(text)
-        if not clean:
+        segments = self._speech_segments(clean)
+        if not segments:
             return
 
         import sounddevice as sd
@@ -201,7 +246,7 @@ class CosyVoiceProxyTTS:
         self._speaking.set()
         stream = None
         producer: threading.Thread | None = None
-        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=24)
+        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=32)
 
         def queue_item(item: bytes | Exception | None) -> bool:
             while not self._interrupt.is_set():
@@ -215,16 +260,19 @@ class CosyVoiceProxyTTS:
         def produce_audio() -> None:
             carry = b""
             try:
-                for chunk in self.stream_pcm(clean):
+                for segment in segments:
                     if self._interrupt.is_set():
                         break
-                    data = carry + chunk
-                    carry = b""
-                    if len(data) % 2:
-                        carry = data[-1:]
-                        data = data[:-1]
-                    if data and not queue_item(data):
-                        break
+                    for chunk in self.stream_pcm(segment):
+                        if self._interrupt.is_set():
+                            break
+                        data = carry + chunk
+                        carry = b""
+                        if len(data) % 2:
+                            carry = data[-1:]
+                            data = data[:-1]
+                        if data and not queue_item(data):
+                            return
             except Exception as exc:
                 queue_item(exc)
             finally:
@@ -232,9 +280,8 @@ class CosyVoiceProxyTTS:
 
         try:
             self._health()
-            sample_rate = self._sample_rate
-            bytes_per_second = sample_rate * 2
-            target_prebuffer_bytes = max(4096, int(bytes_per_second * 0.30))
+            bytes_per_second = self._sample_rate * 2
+            target_prebuffer_bytes = max(4096, int(bytes_per_second * 0.18))
 
             started = time.monotonic()
             producer = threading.Thread(
@@ -276,7 +323,8 @@ class CosyVoiceProxyTTS:
             buffered_seconds = len(prebuffer) / float(max(1, self._sample_rate * 2))
             print(
                 f"[TTS] primo_audio={first_audio_seconds:.2f}s · "
-                f"prebuffer={buffered_seconds:.2f}s · playback=streaming"
+                f"prebuffer={buffered_seconds:.2f}s · "
+                f"frasi={len(segments)} · playback=streaming"
             )
             stream.write(bytes(prebuffer))
 
