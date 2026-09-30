@@ -74,6 +74,42 @@ class JarvisOrchestrator:
         }
         self.set_state(JarvisState.IDLE)
 
+    def start_session(self, *, local_time: str = "", locale: str = "it-IT") -> str:
+        """Let the AI open a voice session naturally instead of reading a fixed script.
+
+        The opening is appended as an assistant turn, so a reply such as "bene" or
+        "purtroppo sì" is interpreted as a continuation of the greeting rather than
+        as an isolated command.
+        """
+        self.set_state(JarvisState.THINKING)
+        time_context = local_time.strip() or "ora locale non disponibile"
+        opening_instruction = (
+            "La sessione vocale con l'utente è appena iniziata. Apri tu la conversazione "
+            "in modo spontaneo e naturale, come una presenza intelligente già attiva nella stanza. "
+            f"Ora/data locale comunicata dal dispositivo: {time_context}. Locale: {locale or 'it-IT'}. "
+            "Non dire che sei un'IA, non descrivere il sistema e non elencare capacità. "
+            "Non usare una frase standard o sempre identica. Scegli una sola apertura breve: "
+            "un saluto coerente con il momento della giornata e, quando naturale, una semplice "
+            "domanda o osservazione per avviare il dialogo. Mantieni il tono JARVIS: composto, "
+            "elegante, discreto e umano nel ritmo. Rivolgiti all'utente come 'signore' solo se suona naturale."
+        )
+        try:
+            assistant_message = self.client.chat_completion(
+                model=self.model,
+                messages=[*self.messages, {"role": "system", "content": opening_instruction}],
+                tools=None,
+                temperature=0.78,
+            )
+            content = str(assistant_message.get("content") or "").strip()
+            if not content:
+                content = "Buongiorno, signore. Come va questa mattina?"
+            self.messages.append({"role": "assistant", "content": content})
+            self.set_state(JarvisState.SPEAKING)
+            return content
+        except Exception:
+            self.set_state(JarvisState.ERROR)
+            raise
+
     def _messages_with_context(
         self,
         query: str,
