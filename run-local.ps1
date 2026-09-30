@@ -16,6 +16,52 @@ Write-Host "[1/7] Aggiorno Python e dipendenze locali..."
 & $python -m pip install --upgrade pip
 & $python -m pip install -r requirements-local.txt
 
+# faster-whisper/CTranslate2 on Windows expects CUDA 12 cuBLAS and cuDNN DLLs
+# on PATH. The CosyVoice environment already contains a Blackwell-compatible
+# PyTorch CUDA 12.8 runtime, so reuse those local DLLs instead of installing a
+# second CUDA stack just for STT.
+$cudaRuntimeDirs = @(
+    (Join-Path $env:USERPROFILE "miniconda3\envs\jarvis-cosyvoice\Lib\site-packages\torch\lib"),
+    (Join-Path $env:USERPROFILE "miniconda3\envs\jarvis-cosyvoice\Library\bin"),
+    (Join-Path $env:LOCALAPPDATA "miniconda3\envs\jarvis-cosyvoice\Lib\site-packages\torch\lib"),
+    (Join-Path $env:LOCALAPPDATA "miniconda3\envs\jarvis-cosyvoice\Library\bin"),
+    (Join-Path $env:USERPROFILE "anaconda3\envs\jarvis-cosyvoice\Lib\site-packages\torch\lib"),
+    (Join-Path $env:USERPROFILE "anaconda3\envs\jarvis-cosyvoice\Library\bin"),
+    (Join-Path $env:LOCALAPPDATA "anaconda3\envs\jarvis-cosyvoice\Lib\site-packages\torch\lib"),
+    (Join-Path $env:LOCALAPPDATA "anaconda3\envs\jarvis-cosyvoice\Library\bin")
+)
+
+$addedCudaDirs = @()
+foreach ($dir in $cudaRuntimeDirs) {
+    if ($dir -and (Test-Path -LiteralPath $dir)) {
+        $env:PATH = "$dir;$env:PATH"
+        $addedCudaDirs += $dir
+    }
+}
+
+if ($addedCudaDirs.Count -gt 0) {
+    $cublas = $null
+    $cudnn = $null
+    foreach ($dir in $addedCudaDirs) {
+        if (-not $cublas) {
+            $cublas = Get-ChildItem -LiteralPath $dir -Filter "cublas64_12.dll" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        if (-not $cudnn) {
+            $cudnn = Get-ChildItem -LiteralPath $dir -Filter "cudnn64_9.dll" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+    }
+    if ($cublas) {
+        Write-Host "CUDA STT: cuBLAS 12 disponibile ($($cublas.DirectoryName))." -ForegroundColor Green
+    } else {
+        Write-Warning "CUDA STT: cublas64_12.dll non trovato; faster-whisper usera' il fallback CPU se necessario."
+    }
+    if ($cudnn) {
+        Write-Host "CUDA STT: cuDNN 9 disponibile ($($cudnn.DirectoryName))." -ForegroundColor Green
+    } else {
+        Write-Warning "CUDA STT: cudnn64_9.dll non trovato; faster-whisper potrebbe usare il fallback CPU."
+    }
+}
+
 Write-Host "[2/7] Controllo Hybrid Brain opzionale..."
 $openJarvisEnabled = $false
 if (Test-Path ".env") {
