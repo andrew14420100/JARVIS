@@ -14,7 +14,10 @@ from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
-_WAKE_ALIASES = r"(?:hey\s+)?(?:jarvis|jervis|gervis|giarvis|jarviss|giannis|giardini|giardinis)"
+_WAKE_ALIASES = (
+    r"(?:(?:hey|ehi)\s*[,.:;!?\-]*\s*)?"
+    r"(?:jarvis|jervis|gervis|giarvis|jarviss|giannis|giardini|giardinis|gia\s+e\s+bis|già\s+e\s+bis)"
+)
 
 
 def _strip_wake_phrase(text: str) -> str:
@@ -25,8 +28,13 @@ def _strip_wake_phrase(text: str) -> str:
         value,
         count=1,
         flags=re.I,
-    )
-    return value.strip()
+    ).strip()
+    # Whisper can occasionally emit only the interjection and punctuation when
+    # the wake name itself is clipped. Treat that as an empty activation rather
+    # than sending "Hey"/"Ehi" to the brain as if it were a user command.
+    if re.fullmatch(r"(?:hey|ehi)[\s,.!?;:\-]*", value, flags=re.I):
+        return ""
+    return value
 
 
 def main() -> None:
