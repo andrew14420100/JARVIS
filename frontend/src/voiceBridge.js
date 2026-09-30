@@ -189,7 +189,6 @@ function completeSpeech({ openFollowup, greeting }) {
 }
 
 async function playGeneratedAudio(blob, options) {
-  stopAudio();
   activeAudioUrl = URL.createObjectURL(blob);
   activeAudio = new Audio(activeAudioUrl);
   activeAudio.preload = 'auto';
@@ -255,7 +254,6 @@ async function playPcmStream(response, options) {
     return;
   }
 
-  stopAudio();
   const generation = pcmGeneration;
   const ctx = await getPcmContext();
   const sampleRate = Number(response.headers.get('X-Sample-Rate')) || 24000;
@@ -330,6 +328,7 @@ async function speak(text, { openFollowup = true, greeting = false } = {}) {
   }
 
   stopRecognition();
+  stopAudio();
   followupDeadline = 0;
   speaking = true;
   setHint('');
