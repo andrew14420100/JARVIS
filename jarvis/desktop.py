@@ -29,12 +29,50 @@ def _strip_wake_phrase(text: str) -> str:
         count=1,
         flags=re.I,
     ).strip()
-    # Whisper can occasionally emit only the interjection and punctuation when
-    # the wake name itself is clipped. Treat that as an empty activation rather
-    # than sending "Hey"/"Ehi" to the brain as if it were a user command.
     if re.fullmatch(r"(?:hey|ehi)[\s,.!?;:\-]*", value, flags=re.I):
         return ""
+
+    # The wake detector has already confirmed that this utterance began with
+    # Jarvis. Whisper can still invent arbitrary proper names for the wake word
+    # (for example "Hey, Giorgio, Miss"). If an activation starts with Hey/Ehi,
+    # treat the next one/two short tokens as a likely wake-name transcription.
+    # Preserve everything after them so one-shot commands still work.
+    match = re.match(r"^\s*(?:hey|ehi)\b[\s,.!?;:\-]*(.*)$", value, flags=re.I)
+    if match:
+        remainder = match.group(1).strip(" ,.!?;:-")
+        words = remainder.split()
+        if len(words) <= 2:
+            return ""
+        wake_fragments = {"miss", "vis", "bis", "mister", "mis"}
+        drop = 2 if len(words) >= 4 and words[1].casefold().strip(".,!?;:-") in wake_fragments else 1
+        return " ".join(words[drop:]).strip(" ,.!?;:-")
     return value
+
+
+def _tail_peak_rms(audio, *, sample_rate: int = 16000, seconds: float = 0.45) -> float:
+    """Return the loudest short-frame RMS in the activation tail.
+
+    The callback fires as soon as openWakeWord detects Jarvis. Keeping the wake
+    stream alive briefly lets us tell the difference between an isolated wake
+    word and a continuous command such as "Jarvis, come stai?" without sending
+    every wake phrase through Whisper.
+    """
+    import numpy as np
+
+    array = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if not array.size:
+        return 0.0
+    tail_samples = max(1, int(sample_rate * max(0.1, seconds)))
+    tail = array[-tail_samples:]
+    frame = max(160, int(sample_rate * 0.08))
+    peak = 0.0
+    for start in range(0, tail.size, frame):
+        chunk = tail[start : start + frame]
+        if not chunk.size:
+            continue
+        rms = float(np.sqrt(np.mean(np.square(chunk))))
+        peak = max(peak, rms)
+    return peak
 
 
 def main() -> None:
@@ -91,9 +129,6 @@ def main() -> None:
             "aggiungi il campione e avvia start-cosyvoice.ps1 quando disponibile."
         )
 
-    # Warm Whisper before the user ever says the wake word. This moves model
-    # loading/CUDA initialization to startup instead of making the first spoken
-    # request appear frozen after "Ti ascolto...".
     try:
         print("[STT] Precarico Whisper...")
         stt_device, stt_warm_seconds = stt.warmup()
@@ -185,15 +220,19 @@ def main() -> None:
             return
         busy.set()
 
-        # Keep the wake stream alive briefly so "Jarvis, come stai?" remains
-        # one continuous utterance instead of losing the words after Jarvis.
+        # Keep capturing a short post-roll before taking ownership away from the
+        # wake listener. If speech continues, this is a one-shot command. If the
+        # tail is quiet, skip Whisper entirely and acknowledge immediately.
         time.sleep(0.45)
 
         activation_audio = None
+        activation_tail_rms = 0.0
         try:
             activation_audio = wake.recent_audio(1.8, exclude_tail_seconds=0.0)
+            activation_tail_rms = _tail_peak_rms(activation_audio)
         except Exception:
             activation_audio = None
+            activation_tail_rms = 0.0
 
         if wake.selected_device is not None:
             stt.input_device = wake.selected_device
@@ -201,12 +240,21 @@ def main() -> None:
         wake.pause()
         try:
             print("[JARVIS] Ti ascolto...")
-            text = capture_turn(
-                initial_silence_seconds=1.1,
-                max_seconds=min(settings.listener_max_utterance_seconds, 15.0),
-                activation_audio=activation_audio,
-                strip_wake=True,
-            )
+            continuation_threshold = 0.00055
+            if activation_tail_rms >= continuation_threshold:
+                print(f"[JARVIS] Comando continuo rilevato · tail_rms={activation_tail_rms:.4f}")
+                text = capture_turn(
+                    initial_silence_seconds=1.1,
+                    max_seconds=min(settings.listener_max_utterance_seconds, 15.0),
+                    activation_audio=activation_audio,
+                    strip_wake=True,
+                )
+            else:
+                print(
+                    f"[JARVIS] Wake isolata · tail_rms={activation_tail_rms:.4f} · "
+                    "salto decodifica wake"
+                )
+                text = ""
 
             if not text:
                 if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
@@ -225,9 +273,6 @@ def main() -> None:
                 agent.set_state(JarvisState.IDLE)
                 return
 
-            # Presence now means explicit conversational context only. Ambient
-            # room audio is never transcribed automatically, avoiding invented
-            # snippets from background noise.
             context = presence.as_context() if settings.presence_enabled else ""
             answer_turn(text, ambient_context=context)
 
