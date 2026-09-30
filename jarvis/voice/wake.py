@@ -34,6 +34,7 @@ class WakeWordListener:
         self.sample_rate = sample_rate
         self.context_seconds = max(2.0, context_seconds)
         self.input_device = input_device
+        self.selected_device: int | None = None
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._stream_released = threading.Event()
@@ -124,6 +125,108 @@ class WakeWordListener:
 
         return max(matches, key=lambda item: item[1])
 
+    def _candidate_input_devices(self, sd) -> list[int]:
+        """Return Windows input candidates in a useful order.
+
+        PortAudio can expose digital interfaces, monitor/loopback endpoints and
+        real microphones at the same time. The Windows default is not always a
+        usable microphone, so prefer devices whose names explicitly look like a
+        microphone and only then try the remaining input endpoints.
+        """
+        devices = list(sd.query_devices())
+        input_indexes = [
+            index for index, info in enumerate(devices)
+            if int(info.get("max_input_channels", 0) or 0) > 0
+        ]
+
+        ordered: list[int] = []
+
+        def add(index: int | None) -> None:
+            if index is None:
+                return
+            if index in input_indexes and index not in ordered:
+                ordered.append(index)
+
+        configured = self.input_device
+        if configured not in (None, ""):
+            if isinstance(configured, int) or (isinstance(configured, str) and configured.strip().isdigit()):
+                add(int(configured))
+            else:
+                wanted = str(configured).casefold().strip()
+                for index in input_indexes:
+                    if str(devices[index].get("name", "")).casefold().strip() == wanted:
+                        add(index)
+                for index in input_indexes:
+                    if wanted and wanted in str(devices[index].get("name", "")).casefold():
+                        add(index)
+
+        microphone_words = ("microfono", "microphone", "headset mic", "headset microphone", " mic", "mic ")
+        for index in input_indexes:
+            name = f" {str(devices[index].get('name', '')).casefold()} "
+            if any(word in name for word in microphone_words):
+                add(index)
+
+        try:
+            default_device = sd.default.device
+            default_input = int(default_device[0] if isinstance(default_device, (tuple, list)) else default_device)
+            if default_input >= 0:
+                add(default_input)
+        except Exception:
+            pass
+
+        # Last resort: any remaining capture endpoint. Digital/loopback devices
+        # are deliberately tried after microphone-looking endpoints.
+        for index in input_indexes:
+            add(index)
+        return ordered
+
+    def _probe_input_device(self, sd, index: int) -> tuple[bool, str]:
+        try:
+            info = sd.query_devices(index, "input")
+            stream = sd.RawInputStream(
+                device=index,
+                samplerate=self.sample_rate,
+                blocksize=self.chunk_size,
+                channels=1,
+                dtype="int16",
+            )
+            try:
+                stream.start()
+                stream.read(self.chunk_size)
+            finally:
+                try:
+                    stream.stop()
+                except Exception:
+                    pass
+                stream.close()
+            return True, str(info.get("name", f"device {index}"))
+        except Exception as exc:
+            try:
+                name = str(sd.query_devices(index).get("name", f"device {index}"))
+            except Exception:
+                name = f"device {index}"
+            print(f"[AUDIO] Scarto input [{index}] {name}: {exc}")
+            return False, name
+
+    def _select_working_input_device(self, sd, *, exclude: set[int] | None = None) -> int:
+        excluded = exclude or set()
+        for index in self._candidate_input_devices(sd):
+            if index in excluded:
+                continue
+            ok, name = self._probe_input_device(sd, index)
+            if ok:
+                self.selected_device = index
+                info = sd.query_devices(index, "input")
+                print(
+                    f"[JARVIS] Microfono: [{index}] {name} · "
+                    f"{float(info.get('default_samplerate', self.sample_rate)):.0f} Hz"
+                )
+                return index
+        raise RuntimeError(
+            "Nessun ingresso microfono PortAudio disponibile a 16 kHz. "
+            "Esegui .\\list-audio-inputs.ps1 per vedere gli ingressi disponibili."
+        )
+
     def run(
         self,
         callback: Callable[[], None],
@@ -144,28 +247,7 @@ class WakeWordListener:
         soft_threshold = max(0.12, min(0.18, self.threshold * 0.45))
         speech_rms_gate = 0.008
 
-        try:
-            if self.input_device not in (None, ""):
-                selected_input = sd.query_devices(self.input_device, "input")
-            else:
-                selected_input = sd.query_devices(kind="input")
-            if selected_input:
-                print(
-                    "[JARVIS] Microfono: "
-                    f"{selected_input.get('name', 'input predefinito')} · "
-                    f"{selected_input.get('default_samplerate', self.sample_rate):.0f} Hz"
-                )
-        except Exception as exc:
-            print(f"[JARVIS] Microfono non identificato: {exc}")
-
-        stream_kwargs: dict[str, Any] = {
-            "samplerate": self.sample_rate,
-            "blocksize": self.chunk_size,
-            "channels": 1,
-            "dtype": "int16",
-        }
-        if self.input_device not in (None, ""):
-            stream_kwargs["device"] = self.input_device
+        selected_device = self._select_working_input_device(sd)
 
         while not self._stop.is_set():
             if self._pause.is_set():
@@ -174,6 +256,13 @@ class WakeWordListener:
                 continue
 
             self._stream_released.clear()
+            stream_kwargs: dict[str, Any] = {
+                "device": selected_device,
+                "samplerate": self.sample_rate,
+                "blocksize": self.chunk_size,
+                "channels": 1,
+                "dtype": "int16",
+            }
             try:
                 with sd.RawInputStream(**stream_kwargs) as stream:
                     while not self._stop.is_set() and not self._pause.is_set():
@@ -236,6 +325,11 @@ class WakeWordListener:
                             daemon=True,
                             name="jarvis-wake-callback",
                         ).start()
+            except Exception as exc:
+                if self._stop.is_set() or self._pause.is_set():
+                    continue
+                print(f"[AUDIO] Il microfono [{selected_device}] non e' piu' disponibile: {exc}")
+                selected_device = self._select_working_input_device(sd, exclude={selected_device})
             finally:
                 self._stream_released.set()
 
