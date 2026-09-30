@@ -1,8 +1,9 @@
 // JARVIS browser voice bridge for the Emergent-hosted web runtime.
 //
-// The browser owns microphone capture. Modern browsers require microphone
-// consent at least once for a site; after that permission is persisted, JARVIS
-// can resume listening automatically on later visits without another prompt.
+// Goal: make speech feel like a live conversation rather than push-to-talk.
+// The browser keeps a continuous recognition session, uses interim transcripts,
+// commits the turn after a short natural pause, and supports barge-in while
+// JARVIS is speaking. Microphone permission is still controlled by the browser.
 
 let recognition = null;
 let recognitionRunning = false;
@@ -17,12 +18,25 @@ let activeAudioUrl = '';
 let pcmContext = null;
 let pcmAbortController = null;
 let pcmGeneration = 0;
+let pendingTurnTimer = null;
+let finalBuffer = '';
+let interimBuffer = '';
+let micStream = null;
+let micMonitorContext = null;
+let micAnalyser = null;
+let micMonitorFrame = 0;
+let bargeInSince = 0;
+let speechStartedAt = 0;
 const pcmSources = new Set();
 
 const RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
-const CONVERSATION_WINDOW_MS = 45000;
-const RESTART_DELAY_MS = 280;
+const CONVERSATION_WINDOW_MS = 60000;
+const RESTART_DELAY_MS = 160;
+const TURN_SILENCE_MS = 700;
+const BARGE_IN_RMS = 0.055;
+const BARGE_IN_HOLD_MS = 220;
+const BARGE_IN_GUARD_MS = 650;
 
 function setHint(text) {
   const hint = document.querySelector('.hint');
@@ -57,8 +71,23 @@ function normalizeWakeTranscript(text) {
   return { activated: true, command };
 }
 
+function clearPendingTurn() {
+  if (pendingTurnTimer) window.clearTimeout(pendingTurnTimer);
+  pendingTurnTimer = null;
+}
+
+function resetTranscriptBuffers() {
+  finalBuffer = '';
+  interimBuffer = '';
+  clearPendingTurn();
+}
+
 function stopRecognition() {
-  if (!recognition) return;
+  clearPendingTurn();
+  if (!recognition) {
+    recognitionRunning = false;
+    return;
+  }
   try {
     recognition.abort();
   } catch {
@@ -114,17 +143,20 @@ function installOneTimeGesture(action) {
   document.addEventListener('keydown', retry, true);
 }
 
-async function requestMicrophone() {
+async function ensureMicrophoneStream() {
+  if (micStream?.active) return true;
   if (!navigator.mediaDevices?.getUserMedia) return false;
+
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
+        channelCount: 1,
       },
     });
-    stream.getTracks().forEach((track) => track.stop());
+    startMicMonitor();
     return true;
   } catch (error) {
     console.warn('[JARVIS] Microphone permission:', error);
@@ -132,20 +164,131 @@ async function requestMicrophone() {
   }
 }
 
+function startMicMonitor() {
+  if (!micStream?.active || micMonitorFrame) return;
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) return;
+
+  try {
+    micMonitorContext = micMonitorContext || new AudioContextCtor();
+    const source = micMonitorContext.createMediaStreamSource(micStream);
+    micAnalyser = micMonitorContext.createAnalyser();
+    micAnalyser.fftSize = 1024;
+    source.connect(micAnalyser);
+    const samples = new Float32Array(micAnalyser.fftSize);
+
+    const tick = () => {
+      if (!voiceRuntimeStarted || !micAnalyser) {
+        micMonitorFrame = 0;
+        return;
+      }
+
+      micAnalyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        sum += samples[index] * samples[index];
+      }
+      const rms = Math.sqrt(sum / samples.length);
+
+      if (
+        speaking
+        && Date.now() - speechStartedAt > BARGE_IN_GUARD_MS
+        && Date.now() < conversationDeadline
+        && rms >= BARGE_IN_RMS
+      ) {
+        if (!bargeInSince) bargeInSince = performance.now();
+        if (performance.now() - bargeInSince >= BARGE_IN_HOLD_MS) {
+          bargeInSince = 0;
+          interruptForUserSpeech();
+        }
+      } else {
+        bargeInSince = 0;
+      }
+
+      micMonitorFrame = window.requestAnimationFrame(tick);
+    };
+
+    micMonitorFrame = window.requestAnimationFrame(tick);
+  } catch (error) {
+    console.warn('[JARVIS] Microphone monitor:', error);
+    micMonitorFrame = 0;
+  }
+}
+
+function interruptForUserSpeech() {
+  if (!speaking) return;
+  speaking = false;
+  stopAudio();
+  conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
+  setVoiceState('listening');
+  setHint('La ascolto, signore.');
+  resetTranscriptBuffers();
+  startRecognition();
+}
+
 function scheduleRecognitionRestart(delay = RESTART_DELAY_MS) {
-  if (!voiceRuntimeStarted || speaking || recognitionRunning) return;
+  if (!voiceRuntimeStarted || recognitionRunning) return;
   window.setTimeout(() => {
-    if (voiceRuntimeStarted && !speaking && !recognitionRunning) startRecognition();
+    if (voiceRuntimeStarted && !recognitionRunning) startRecognition();
   }, delay);
+}
+
+function candidateTranscript() {
+  return `${finalBuffer} ${interimBuffer}`.replace(/\s+/g, ' ').trim();
+}
+
+function commitCurrentTurn() {
+  pendingTurnTimer = null;
+  if (submitted || speaking) return;
+
+  let text = candidateTranscript();
+  if (!text) return;
+
+  const activeConversation = Date.now() < conversationDeadline;
+  const parsed = normalizeWakeTranscript(text);
+
+  if (!activeConversation) {
+    if (!parsed.activated) {
+      resetTranscriptBuffers();
+      setVoiceState('standby');
+      setHint('In standby. Dica “Jarvis”.');
+      return;
+    }
+
+    conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
+    if (!parsed.command) {
+      resetTranscriptBuffers();
+      setVoiceState('listening');
+      setHint('La ascolto, signore.');
+      return;
+    }
+    text = parsed.command;
+  }
+
+  text = text.trim();
+  if (!text) return;
+
+  submitted = true;
+  conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
+  resetTranscriptBuffers();
+  stopRecognition();
+  setHint('');
+  emitVoiceInput(text);
+}
+
+function scheduleTurnCommit() {
+  clearPendingTurn();
+  pendingTurnTimer = window.setTimeout(commitCurrentTurn, TURN_SILENCE_MS);
 }
 
 function startRecognition() {
   if (!RecognitionCtor || !voiceRuntimeStarted || recognitionRunning || speaking) return;
 
   submitted = false;
+  resetTranscriptBuffers();
   recognition = new RecognitionCtor();
   recognition.lang = 'it-IT';
-  recognition.continuous = false;
+  recognition.continuous = true;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
@@ -156,37 +299,45 @@ function startRecognition() {
     setHint(activeConversation ? 'La ascolto, signore.' : 'In standby. Dica “Jarvis”.');
   };
 
+  recognition.onspeechstart = () => {
+    if (Date.now() < conversationDeadline) {
+      setVoiceState('listening');
+      setHint('La ascolto, signore.');
+    }
+  };
+
   recognition.onresult = (event) => {
-    let finalText = '';
+    let newestInterim = '';
+
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
-      if (result?.isFinal) finalText += result?.[0]?.transcript || '';
+      const text = String(result?.[0]?.transcript || '').trim();
+      if (!text) continue;
+
+      if (result.isFinal) {
+        finalBuffer = `${finalBuffer} ${text}`.replace(/\s+/g, ' ').trim();
+      } else {
+        newestInterim = text;
+      }
     }
 
-    finalText = finalText.trim();
-    if (!finalText || submitted) return;
+    interimBuffer = newestInterim;
+    const heard = candidateTranscript();
+    if (!heard || submitted) return;
 
     const activeConversation = Date.now() < conversationDeadline;
-    const parsed = normalizeWakeTranscript(finalText);
+    const parsed = normalizeWakeTranscript(heard);
 
-    if (!activeConversation) {
-      if (!parsed.activated) return;
-
+    if (!activeConversation && parsed.activated) {
       conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
-      if (!parsed.command) {
-        setVoiceState('listening');
-        setHint('La ascolto, signore.');
-        return;
-      }
-
-      finalText = parsed.command;
+      setVoiceState('listening', heard);
+      setHint(parsed.command ? `Ho sentito: ${parsed.command}` : 'La ascolto, signore.');
+    } else if (activeConversation) {
+      setVoiceState('listening', heard);
+      setHint(`Ho sentito: ${heard}`);
     }
 
-    submitted = true;
-    stopRecognition();
-    conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
-    setHint('');
-    emitVoiceInput(finalText);
+    scheduleTurnCommit();
   };
 
   recognition.onerror = (event) => {
@@ -210,6 +361,14 @@ function startRecognition() {
   recognition.onend = () => {
     recognitionRunning = false;
     recognition = null;
+    clearPendingTurn();
+
+    // Chrome may stop continuous recognition after an internal timeout. If it
+    // produced usable text immediately before ending, commit that text first.
+    if (!submitted && !speaking && candidateTranscript()) {
+      commitCurrentTurn();
+      return;
+    }
     scheduleRecognitionRestart();
   };
 
@@ -219,7 +378,7 @@ function startRecognition() {
     recognitionRunning = false;
     recognition = null;
     console.warn('[JARVIS] Unable to start recognition:', error);
-    scheduleRecognitionRestart(700);
+    scheduleRecognitionRestart(450);
   }
 }
 
@@ -231,7 +390,7 @@ async function startVoiceRuntime({ requestPermission = true } = {}) {
   }
 
   let allowed = true;
-  if (requestPermission) allowed = await requestMicrophone();
+  if (requestPermission || !micStream?.active) allowed = await ensureMicrophoneStream();
   if (!allowed) {
     setVoiceState('permission-needed');
     setHint('Autorizzi il microfono una sola volta; poi JARVIS partirà automaticamente.');
@@ -240,6 +399,7 @@ async function startVoiceRuntime({ requestPermission = true } = {}) {
   }
 
   voiceRuntimeStarted = true;
+  startMicMonitor();
   setVoiceState('standby');
   startRecognition();
 }
@@ -275,6 +435,7 @@ async function bootstrapVoiceRuntime() {
 function reopenConversation() {
   conversationDeadline = Date.now() + CONVERSATION_WINDOW_MS;
   speaking = false;
+  resetTranscriptBuffers();
   if (!recognitionRunning) startRecognition();
 }
 
@@ -304,10 +465,11 @@ async function playPcmStream(response) {
   const reader = response.body?.getReader?.();
   if (!reader) throw new Error('Streaming audio non supportato.');
 
-  let scheduledAt = ctx.currentTime + 0.035;
+  let scheduledAt = ctx.currentTime + 0.025;
   let carry = new Uint8Array(0);
   let heardAnything = false;
   speaking = true;
+  speechStartedAt = Date.now();
   setVoiceState('speaking');
 
   while (true) {
@@ -339,19 +501,21 @@ async function playPcmStream(response) {
     pcmSources.add(source);
     source.onended = () => pcmSources.delete(source);
 
-    const startAt = Math.max(scheduledAt, ctx.currentTime + 0.015);
+    const startAt = Math.max(scheduledAt, ctx.currentTime + 0.010);
     source.start(startAt);
     scheduledAt = startAt + buffer.duration;
     heardAnything = true;
   }
 
-  if (!heardAnything) {
-    reopenConversation();
+  if (!heardAnything || generation !== pcmGeneration) {
+    if (generation === pcmGeneration) reopenConversation();
     return;
   }
 
-  const remainingMs = Math.max(0, (scheduledAt - ctx.currentTime) * 1000) + 60;
-  window.setTimeout(reopenConversation, remainingMs);
+  const remainingMs = Math.max(0, (scheduledAt - ctx.currentTime) * 1000) + 40;
+  window.setTimeout(() => {
+    if (generation === pcmGeneration) reopenConversation();
+  }, remainingMs);
 }
 
 async function playGeneratedAudio(blob) {
@@ -361,6 +525,7 @@ async function playGeneratedAudio(blob) {
   activeAudio.preload = 'auto';
   activeAudio.onplaying = () => {
     speaking = true;
+    speechStartedAt = Date.now();
     setVoiceState('speaking');
   };
   activeAudio.onended = reopenConversation;
@@ -387,6 +552,7 @@ async function speak(text, { greeting = false } = {}) {
   stopRecognition();
   stopAudio();
   speaking = true;
+  speechStartedAt = Date.now();
   setVoiceState('speaking');
 
   try {
@@ -439,6 +605,13 @@ window.addEventListener('beforeunload', () => {
   voiceRuntimeStarted = false;
   stopRecognition();
   stopAudio();
+  if (micMonitorFrame) window.cancelAnimationFrame(micMonitorFrame);
+  micMonitorFrame = 0;
+  if (micStream) micStream.getTracks().forEach((track) => track.stop());
+  micStream = null;
+  if (micMonitorContext && micMonitorContext.state !== 'closed') {
+    micMonitorContext.close().catch(() => {});
+  }
   if (pcmContext && pcmContext.state !== 'closed') {
     pcmContext.close().catch(() => {});
   }
