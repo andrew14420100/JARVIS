@@ -33,6 +33,8 @@ class LocalSTT:
         self._model_device: str | None = None
         self.abort_event = threading.Event()
         self.last_recording_heard_speech = False
+        self.last_recording_max_rms = 0.0
+        self.last_recording_speech_threshold = 0.0
 
     @staticmethod
     def dependency_status() -> dict[str, bool]:
@@ -102,24 +104,27 @@ class LocalSTT:
     def record_until_silence(
         self,
         sample_rate: int = 16000,
-        silence_threshold: float = 0.010,
-        speech_threshold: float = 0.014,
-        silence_seconds: float = 1.0,
-        max_seconds: float = 45.0,
-        initial_silence_seconds: float | None = None,
+        silence_threshold: float = 0.0025,
+        speech_threshold: float = 0.0045,
+        silence_seconds: float = 0.75,
+        max_seconds: float = 30.0,
+        initial_silence_seconds: float | None = 6.0,
     ):
         """Record one natural conversational turn.
 
-        Recording starts immediately, ends after speech followed by a short
-        silence, and can optionally time out if the user never begins speaking.
-        `last_recording_heard_speech` lets callers leave an active conversation
-        without wasting a Whisper pass on pure silence.
+        The thresholds are intentionally permissive for consumer microphones.
+        Whisper performs its own VAD afterwards, so it is safer to retain quiet
+        speech than to discard it here. Diagnostic RMS values are kept for the
+        desktop runtime so microphone-level problems are visible immediately.
         """
         import numpy as np
         import sounddevice as sd
 
         self.abort_event.clear()
         self.last_recording_heard_speech = False
+        self.last_recording_max_rms = 0.0
+        self.last_recording_speech_threshold = float(speech_threshold)
+
         chunk_seconds = 0.16
         chunk = int(sample_rate * chunk_seconds)
         silent_needed = max(1, int(silence_seconds / chunk_seconds))
@@ -140,6 +145,7 @@ class LocalSTT:
                 flat = data.reshape(-1).copy()
                 recording.append(flat)
                 rms = float(np.sqrt(np.mean(np.square(flat)))) if flat.size else 0.0
+                self.last_recording_max_rms = max(self.last_recording_max_rms, rms)
 
                 if rms >= speech_threshold:
                     heard_speech = True
