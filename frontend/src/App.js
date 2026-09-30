@@ -30,7 +30,7 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [hint, setHint] = useState('Premi il microfono: il core reagirà in tempo reale alla tua voce.');
   const [online, setOnline] = useState('INITIALIZING');
-  const [model, setModel] = useState('LOCAL CORE');
+  const [model, setModel] = useState('CLOUD CORE');
   const [clock, setClock] = useState('00:00:00');
   const [micActive, setMicActive] = useState(false);
   const [localVoiceActive, setLocalVoiceActive] = useState(false);
@@ -66,11 +66,13 @@ export default function App() {
       try {
         const response = await fetch(`${API_BASE}/api/health`);
         const data = await response.json();
-        setOnline(data.ok ? 'JARVIS ONLINE' : 'LM STUDIO OFFLINE');
-        setModel(data.models?.[0] ? data.models[0].slice(0, 42) : 'NO MODEL');
+        setOnline(data.ok ? 'JARVIS ONLINE' : 'CLOUD AI OFFLINE');
+        const active = data.active_model || data.models?.[0];
+        const provider = data.provider ? `${data.provider} · ` : '';
+        setModel(active ? `${provider}${active}`.slice(0, 48) : 'NO FREE MODEL');
       } catch {
         setOnline('BACKEND OFFLINE');
-        setModel('LOCAL CORE');
+        setModel('CLOUD CORE');
       }
     };
 
@@ -106,7 +108,7 @@ export default function App() {
         } else if (next === 'LISTENING') {
           setHint('Wake word rilevata — Jarvis ti sta ascoltando.');
         } else if (next === 'THINKING') {
-          setHint('Jarvis sta elaborando la richiesta con il modello locale…');
+          setHint('Jarvis sta elaborando la richiesta con il cervello AI cloud…');
         } else if (next === 'EXECUTING') {
           setHint('Jarvis sta usando uno strumento locale…');
         } else if (next === 'SPEAKING') {
@@ -250,7 +252,7 @@ export default function App() {
     } catch (error) {
       runtimePauseUntilRef.current = Date.now() + 2300;
       setReply(error.message);
-      setHint('Il backend è online, ma il modello locale non è ancora collegato.');
+      setHint('Il backend è online, ma i provider AI gratuiti non sono disponibili o non sono ancora configurati.');
       changeMode('ERROR');
     }
   };
