@@ -115,8 +115,9 @@ try {
     Remove-Item -LiteralPath $tempRequirements -Force -ErrorAction SilentlyContinue
 }
 
-& $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install "huggingface_hub>=0.27,<2"
-Assert-LastExit "Installazione huggingface_hub"
+Write-Host "  - Abilito download Hugging Face ottimizzati (hf_xet)..."
+& $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install "huggingface_hub[hf_xet]>=0.27,<2"
+Assert-LastExit "Installazione huggingface_hub + hf_xet"
 
 Write-Host "[4/5] Scarico Fun-CosyVoice3-0.5B-2512..."
 & $condaExe run --no-capture-output -n jarvis-cosyvoice python (Join-Path $PSScriptRoot "local_voice\download_model.py") --output $modelDir
