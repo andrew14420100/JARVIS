@@ -11,7 +11,7 @@ from jarvis.app import app, get_orchestrator
 from jarvis.config.settings import get_settings
 from jarvis.core.state import JarvisState
 from jarvis.presence import PresenceContext
-from jarvis.voice import LocalSTT, LocalTTS, WakeWordListener
+from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
 def _clean_ambient_transcript(text: str) -> str:
@@ -36,11 +36,21 @@ def main() -> None:
         compute_type=settings.stt_compute_type,
         language=settings.stt_language,
     )
-    tts = LocalTTS(
-        voice=settings.tts_voice,
-        speed=settings.tts_speed,
-        lang_code=settings.tts_lang_code,
-    )
+
+    if settings.tts_mode.strip().lower() == "cosyvoice-local" and settings.cosyvoice_enabled:
+        tts = CosyVoiceProxyTTS(
+            base_url=settings.cosyvoice_service_url,
+            timeout_seconds=settings.request_timeout_seconds,
+        )
+        voice_name = "CosyVoice 3 · cloned local voice"
+    else:
+        tts = LocalTTS(
+            voice=settings.tts_voice,
+            speed=settings.tts_speed,
+            lang_code=settings.tts_lang_code,
+        )
+        voice_name = f"Kokoro · {settings.tts_voice}"
+
     wake = WakeWordListener(
         model_name=settings.wake_model,
         threshold=settings.wake_threshold,
@@ -59,7 +69,8 @@ def main() -> None:
     if missing:
         details = "\n".join(f"  - {item}" for item in missing)
         raise SystemExit(
-            "Mancano dipendenze del runtime locale. Installa requirements-local.txt.\n" + details
+            "Mancano componenti del runtime locale. Se TTS indica cosyvoice_service=false, "
+            "avvia prima start-cosyvoice.ps1 dopo aver configurato la voce.\n" + details
         )
 
     busy = threading.Event()
@@ -91,7 +102,7 @@ def main() -> None:
             agent.set_state(JarvisState.LISTENING)
             if settings.tts_enabled:
                 try:
-                    tts.speak("Sì?", streamed=False)
+                    tts.speak("Sì?", streamed=True)
                 except Exception as exc:
                     print(f"[JARVIS] TTS prompt non disponibile: {exc}")
 
@@ -138,6 +149,8 @@ def main() -> None:
             if settings.tts_enabled and reply:
                 try:
                     agent.set_state(JarvisState.SPEAKING)
+                    # CosyVoice streams PCM chunks as soon as they are generated,
+                    # so playback begins before the full waveform exists.
                     tts.speak(reply, streamed=True)
                 except Exception as exc:
                     print(f"[JARVIS] TTS non disponibile: {exc}")
@@ -162,6 +175,7 @@ def main() -> None:
 
     print("[JARVIS] Desktop runtime online.")
     print(f"[JARVIS] Wake word: {settings.wake_model}")
+    print(f"[JARVIS] Voice: {voice_name}")
     print(f"[JARVIS] Presence context: {settings.presence_context_seconds:.0f}s (RAM only)")
     print("[JARVIS] Hybrid cognitive engine: OpenJarvis + guarded local agent")
     print("[JARVIS] UI: http://127.0.0.1:8000")
