@@ -32,7 +32,7 @@ export default function App() {
   const [clock, setClock] = useState('00:00:00');
   const [localVoiceActive, setLocalVoiceActive] = useState(false);
   const [localRuntimeState, setLocalRuntimeState] = useState('IDLE');
-  const [cloudVoiceLabel, setCloudVoiceLabel] = useState('VOICE FIRST');
+  const [cloudVoiceLabel, setCloudVoiceLabel] = useState('VOICE PENDING');
   const [audioLevel] = useState(0);
   const [bootVisible, setBootVisible] = useState(true);
 
@@ -109,12 +109,19 @@ export default function App() {
         const active = data.active_model || data.models?.[0];
         const provider = data.provider ? `${data.provider} · ` : '';
         setModel(active ? `${provider}${active}`.slice(0, 48) : 'NO FREE MODEL');
-        if (data.cloud_tts?.enabled && data.cloud_tts?.provider === 'fish-audio-s2-pro-zero') {
-          setCloudVoiceLabel('FISH S2 PRO');
+
+        const voice = data.voice || data.cloud_tts || {};
+        if (voice.provider === 'cosyvoice3-local') {
+          setCloudVoiceLabel(voice.ready ? 'COSYVOICE LOCAL' : 'VOICE PENDING');
+        } else if (voice.enabled && voice.provider) {
+          setCloudVoiceLabel(String(voice.provider).toUpperCase().slice(0, 22));
+        } else {
+          setCloudVoiceLabel('VOICE PENDING');
         }
       } catch {
         setOnline('BACKEND OFFLINE');
         setModel('CLOUD CORE');
+        setCloudVoiceLabel('VOICE PENDING');
       }
     };
 
@@ -227,7 +234,7 @@ export default function App() {
   }, []);
 
   const voiceLink = localVoiceActive
-    ? (localRuntimeState === 'IDLE' ? 'LOCAL READY' : localRuntimeState)
+    ? (localRuntimeState === 'IDLE' ? cloudVoiceLabel : localRuntimeState)
     : cloudVoiceLabel;
 
   return (
