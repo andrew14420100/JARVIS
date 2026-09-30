@@ -27,6 +27,8 @@ settings = get_settings()
 def _build_brain_client():
     if settings.brain_mode.strip().lower() == "cloud":
         return CloudAIClient(
+            nvidia_api_key=settings.nvidia_api_key,
+            nvidia_model=settings.nvidia_model,
             zai_api_key=settings.zai_api_key,
             zai_model=settings.zai_model,
             groq_api_key=settings.groq_api_key,
@@ -64,7 +66,7 @@ LEGACY_WEB_DIR = Path(__file__).parent / "web"
 FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
 FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.8.0")
+app = FastAPI(title="JARVIS", version="0.9.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
