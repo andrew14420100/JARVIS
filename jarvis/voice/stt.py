@@ -108,8 +108,6 @@ class LocalSTT:
         model = self._load_model()
         probe = np.zeros(16000, dtype=np.float32)
         try:
-            # Force CTranslate2 to initialize kernels/libraries now. VAD is off
-            # so the inference path is actually touched even on silent audio.
             self._transcribe_once(model, probe, beam_size=1, vad_filter=False)
         except Exception as exc:
             if self._model_device != "cpu":
@@ -143,6 +141,9 @@ class LocalSTT:
     def transcribe(self, audio, sample_rate: int = 16000) -> STTResult:
         del sample_rate
         normalized = self._normalize_audio(audio)
+        if getattr(normalized, "size", 0) == 0:
+            return STTResult(text="", language=self.language or None)
+
         model = self._load_model()
         try:
             return self._transcribe_once(model, normalized, beam_size=1, vad_filter=True)
@@ -163,7 +164,12 @@ class LocalSTT:
         max_seconds: float = 30.0,
         initial_silence_seconds: float | None = 6.0,
     ):
-        """Record one natural conversational turn from the selected mic."""
+        """Record one natural conversational turn from the selected mic.
+
+        If no chunk crosses the speech threshold, return an empty array. This is
+        intentional: decoding pure silence lets Whisper hallucinate phrases and
+        can accidentally send a fake command to the brain.
+        """
         import numpy as np
         import sounddevice as sd
 
@@ -212,8 +218,6 @@ class LocalSTT:
                 elif heard_speech and rms < silence_threshold:
                     silent_chunks += 1
                 elif heard_speech:
-                    # Background noise between the speech and silence threshold
-                    # must not keep the turn open forever.
                     silent_chunks += 0.35
 
                 if heard_speech and silent_chunks >= silent_needed:
@@ -221,8 +225,10 @@ class LocalSTT:
                 if not heard_speech and initial_chunks is not None and index + 1 >= initial_chunks:
                     break
 
+        if not heard_speech:
+            return np.zeros(0, dtype=np.float32)
         if not recording:
-            return np.zeros(chunk, dtype=np.float32)
+            return np.zeros(0, dtype=np.float32)
         return np.concatenate(recording).astype(np.float32, copy=False)
 
     def abort(self) -> None:
