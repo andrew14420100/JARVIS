@@ -9,15 +9,27 @@ $python = ".\.venv\Scripts\python.exe"
 
 $versionOk = & $python -c "import sys; print(int(sys.version_info < (3,14)))"
 if ($versionOk.Trim() -ne "1") {
-    throw "OpenJarvis richiede Python >=3.10 e <3.14. Crea .venv con Python 3.11, 3.12 o 3.13."
+    throw "JARVIS richiede Python >=3.10 e <3.14. Crea .venv con Python 3.11, 3.12 o 3.13."
 }
 
 Write-Host "[1/7] Aggiorno Python e dipendenze locali..."
 & $python -m pip install --upgrade pip
 & $python -m pip install -r requirements-local.txt
 
-Write-Host "[2/7] Installo Hybrid Brain OpenJarvis..."
-& $python -m pip install -r requirements-cognitive.txt
+Write-Host "[2/7] Controllo Hybrid Brain opzionale..."
+$openJarvisEnabled = $false
+if (Test-Path ".env") {
+    $openJarvisLine = Get-Content ".env" | Where-Object { $_ -match '^JARVIS_OPENJARVIS_ENABLED=' } | Select-Object -Last 1
+    if ($openJarvisLine) {
+        $openJarvisEnabled = (($openJarvisLine -split '=', 2)[1].Trim().ToLower()) -eq "true"
+    }
+}
+if ($openJarvisEnabled) {
+    Write-Host "OpenJarvis abilitato: installo/aggiorno il modulo cognitivo..."
+    & $python -m pip install -r requirements-cognitive.txt
+} else {
+    Write-Host "OpenJarvis disabilitato: salto installazione cognitiva pesante."
+}
 
 Write-Host "[3/7] Controllo modelli wake-word..."
 & $python -c "from openwakeword import utils; utils.download_models()"
@@ -74,18 +86,29 @@ if ((Test-Path $voiceAudio) -and (Test-Path $voiceText) -and (Test-Path $cosyRep
         if ($ready) {
             Write-Host "CosyVoice pronto. Voce clonata caricata in memoria."
         } else {
-            Write-Warning "CosyVoice non e' diventato pronto entro 120 secondi. JARVIS continuera' senza TTS."
+            Write-Warning "CosyVoice non e' diventato pronto entro 120 secondi. JARVIS continuera' senza TTS locale."
         }
     } else {
         Write-Host "CosyVoice e' gia' attivo."
     }
 } else {
-    Write-Host "Campione vocale non ancora configurato: JARVIS partira' senza TTS locale."
-    Write-Host "Quando avrai il WAV, useremo private\voices\jarvis.wav e private\voices\jarvis.txt."
+    Write-Host "Campione vocale o runtime CosyVoice non ancora configurato: JARVIS partira' senza TTS locale."
+    Write-Host "Servono private\voices\jarvis.wav e private\voices\jarvis.txt, oltre al modello CosyVoice."
 }
 
 Write-Host "[7/7] Avvio JARVIS..."
-Write-Host "Il cervello AI e' pubblico/cloud; la voce CosyVoice gira invece sul tuo PC."
-Write-Host "Configura almeno una chiave gratuita tra NVIDIA, Z.AI, Groq o OpenRouter nel file .env."
-Write-Host "JARVIS non seleziona automaticamente modelli AI a pagamento."
+$brainMode = "cloud"
+if (Test-Path ".env") {
+    $brainLine = Get-Content ".env" | Where-Object { $_ -match '^JARVIS_BRAIN_MODE=' } | Select-Object -Last 1
+    if ($brainLine) {
+        $brainMode = (($brainLine -split '=', 2)[1].Trim().ToLower())
+    }
+}
+if ($brainMode -eq "local") {
+    Write-Host "Cervello AI: LM Studio locale su http://127.0.0.1:1234/v1"
+    Write-Host "Voce/STT/wake word/memoria/tool: locali."
+} else {
+    Write-Host "Cervello AI: router cloud gratuito configurato nel file .env."
+    Write-Host "JARVIS non seleziona automaticamente modelli AI a pagamento."
+}
 & $python -m jarvis.desktop
