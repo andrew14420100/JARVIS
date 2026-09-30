@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+import json
 from typing import Any
 
 import httpx
@@ -29,13 +31,8 @@ class CloudAIClient:
     Normal cloud priority is deterministic:
     NVIDIA Nemotron 3 Ultra -> Z.AI free GLM -> Groq Free -> OpenRouter Free.
 
-    When ``local_fallback_enabled`` is true and NVIDIA is configured, JARVIS
-    tries the local LM Studio model immediately after a failed NVIDIA request.
-    This gives the desktop runtime the desired path:
-
-        Nemotron 3 Ultra -> local Qwen/LM Studio -> other configured free routes.
-
-    JARVIS never substitutes a paid model.
+    Simple conversational turns can be streamed token-by-token. Tool-bearing
+    turns keep the complete-response path so actions remain deterministic.
     """
 
     NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -162,7 +159,6 @@ class CloudAIClient:
         return self.providers
 
     def list_models(self) -> list[str]:
-        """Return configured cloud model ids without pinging remote providers."""
         return [provider.model for provider in self._configured_or_raise()]
 
     def resolve_model(self, configured_model: str = "") -> str:
@@ -189,7 +185,6 @@ class CloudAIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> bool:
-        """Use deep thinking only when the actual turn benefits from it."""
         if not tools:
             return False
         text = cls._latest_user_text(messages)
@@ -210,7 +205,6 @@ class CloudAIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> bool:
-        """Avoid sending the full tool schema during ordinary voice chat."""
         if not tools:
             return False
         text = cls._latest_user_text(messages)
@@ -228,19 +222,30 @@ class CloudAIClient:
         )
         return any(marker in text for marker in markers)
 
-    def _request_provider(
+    def can_stream_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        return bool(self.providers) and not self._should_offer_tools(messages, tools)
+
+    def _payload(
         self,
         provider: CloudProvider,
         *,
         messages: list[dict[str, Any]],
         selected_tools: list[dict[str, Any]] | None,
         temperature: float,
+        stream: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": provider.model,
             "messages": messages,
             "temperature": temperature,
         }
+        if stream:
+            payload["stream"] = True
         if provider.extra_body:
             payload.update(provider.extra_body)
         if provider.supports_dynamic_thinking:
@@ -250,15 +255,69 @@ class CloudAIClient:
         if selected_tools:
             payload["tools"] = selected_tools
             payload["tool_choice"] = "auto"
+        return payload
 
+    def _request_provider(
+        self,
+        provider: CloudProvider,
+        *,
+        messages: list[dict[str, Any]],
+        selected_tools: list[dict[str, Any]] | None,
+        temperature: float,
+    ) -> dict[str, Any]:
         response = self._client.post(
             f"{provider.base_url}/chat/completions",
             headers=self._headers(provider),
-            json=payload,
+            json=self._payload(
+                provider,
+                messages=messages,
+                selected_tools=selected_tools,
+                temperature=temperature,
+            ),
         )
         response.raise_for_status()
         data = response.json()
         return data["choices"][0]["message"]
+
+    def _stream_provider(
+        self,
+        provider: CloudProvider,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+    ) -> Iterator[str]:
+        produced = False
+        with self._client.stream(
+            "POST",
+            f"{provider.base_url}/chat/completions",
+            headers=self._headers(provider),
+            json=self._payload(
+                provider,
+                messages=messages,
+                selected_tools=None,
+                temperature=temperature,
+                stream=True,
+            ),
+        ) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines():
+                line = raw_line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    break
+                data = json.loads(payload)
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    produced = True
+                    yield content
+        if not produced:
+            raise CloudAIError(f"{provider.name} non ha prodotto testo in streaming.")
 
     def _request_local_fallback(
         self,
@@ -280,6 +339,77 @@ class CloudAIClient:
         self.last_model = local_model
         return message
 
+    def chat_completion_stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.4,
+    ) -> Iterator[str]:
+        del model
+        providers = self._configured_or_raise()
+        errors: list[str] = []
+        local_tried = False
+
+        for provider in providers:
+            emitted = False
+            try:
+                for chunk in self._stream_provider(
+                    provider,
+                    messages=messages,
+                    temperature=temperature,
+                ):
+                    if not emitted:
+                        self.last_provider = provider.name
+                        self.last_model = provider.model
+                        self.last_error = ""
+                    emitted = True
+                    yield chunk
+                if emitted:
+                    return
+            except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError, IndexError, CloudAIError) as exc:
+                if emitted:
+                    self.last_error = f"{provider.name}: stream interrotto: {exc}"
+                    raise CloudAIError(self.last_error) from exc
+                errors.append(f"{provider.name}: {exc}")
+
+            if provider.name == "nvidia-free" and self._local_fallback_enabled:
+                local_tried = True
+                try:
+                    message = self._request_local_fallback(
+                        messages=messages,
+                        selected_tools=None,
+                        temperature=temperature,
+                    )
+                    content = str(message.get("content") or "")
+                    if content:
+                        self.last_error = " | ".join(errors)
+                        yield content
+                        return
+                except (LMStudioError, ValueError, KeyError, IndexError) as exc:
+                    errors.append(f"lmstudio-local-fallback: {exc}")
+
+        if self._local_fallback_enabled and not local_tried:
+            try:
+                message = self._request_local_fallback(
+                    messages=messages,
+                    selected_tools=None,
+                    temperature=temperature,
+                )
+                content = str(message.get("content") or "")
+                if content:
+                    self.last_error = " | ".join(errors)
+                    yield content
+                    return
+            except (LMStudioError, ValueError, KeyError, IndexError) as exc:
+                errors.append(f"lmstudio-local-fallback: {exc}")
+
+        self.last_error = " | ".join(errors)
+        raise CloudAIError(
+            "Tutti i cervelli AI gratuiti configurati sono temporaneamente non disponibili. "
+            f"Dettagli: {self.last_error}"
+        )
+
     def chat_completion(
         self,
         *,
@@ -288,7 +418,7 @@ class CloudAIClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]:
-        del model  # each provider is pinned to its configured free-only model id.
+        del model
         providers = self._configured_or_raise()
         errors: list[str] = []
         selected_tools = tools if self._should_offer_tools(messages, tools) else None
