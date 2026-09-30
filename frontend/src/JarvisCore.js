@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 
-const CORE_PARTICLES = 17000;
-const SWARM_PARTICLES = 7000;
+const CORE_PARTICLES = 18000;
+const SWARM_PARTICLES = 6000;
 const FILAMENT_PARTICLES = 4000;
 
 export const WEBGL_PARTICLE_COUNT = CORE_PARTICLES + SWARM_PARTICLES + FILAMENT_PARTICLES;
@@ -27,21 +27,13 @@ uniform vec2 uMouse;
 out float vAlpha;
 out float vHeat;
 out float vLayer;
-out float vSpark;
-out float vCoreBoost;
 out float vAlong;
+out float vSpark;
 
 mat2 rot(float a) {
   float c = cos(a);
   float s = sin(a);
   return mat2(c, -s, s, c);
-}
-
-float fieldNoise(vec3 p, float t) {
-  float a = sin(dot(p, vec3(2.71, 4.13, 3.37)) * 2.0 + t * 0.59 + aSeed.y * 7.0);
-  float b = cos(dot(p.yzx, vec3(5.19, 2.47, 4.61)) * 1.55 - t * 0.43 + aSeed.z * 6.0);
-  float c = sin((p.x - p.z) * 7.1 + p.y * 4.5 + t * 0.29 + aSeed.w * 8.0);
-  return a * 0.50 + b * 0.31 + c * 0.19;
 }
 
 vec3 flowField(vec3 p, float t) {
@@ -53,154 +45,143 @@ vec3 flowField(vec3 p, float t) {
   ) * 0.5;
 }
 
+float organicNoise(vec3 p, float t) {
+  float a = sin(dot(p, vec3(2.7, 4.1, 3.3)) * 2.0 + t * 0.60 + aSeed.y * 6.0);
+  float b = cos(dot(p.yzx, vec3(5.1, 2.4, 4.6)) * 1.5 - t * 0.42 + aSeed.z * 7.0);
+  float c = sin((p.x - p.z) * 7.0 + p.y * 4.4 + t * 0.28 + aSeed.w * 8.0);
+  return a * 0.50 + b * 0.31 + c * 0.19;
+}
+
 void main() {
   float t = uTime;
+  float along = clamp(aSeed.x, 0.0, 1.0);
   vec3 p = aPosition;
-  float stateSpeed = 0.70;
-  float warp = 0.82;
-  float pulse = 0.86;
+
+  float stateSpeed = 0.72;
+  float warp = 0.84;
+  float reach = 1.0;
 
   if (uState > 0.5 && uState < 1.5) {
-    stateSpeed = 1.12;
-    warp = 1.16;
-    pulse = 1.12;
+    stateSpeed = 1.15;
+    warp = 1.14;
+    reach = 1.04 + uBass * 0.10;
   } else if (uState > 1.5 && uState < 2.5) {
     stateSpeed = 2.05;
     warp = 1.58;
-    pulse = 1.28;
+    reach = 1.10 + uEnergy * 0.08;
   } else if (uState > 2.5 && uState < 3.5) {
     stateSpeed = 2.55;
-    warp = 1.88;
-    pulse = 1.42;
+    warp = 1.90;
+    reach = 1.14 + uEnergy * 0.10;
   } else if (uState > 3.5 && uState < 4.5) {
-    stateSpeed = 1.52;
-    warp = 1.32;
-    pulse = 1.24;
+    stateSpeed = 1.55;
+    warp = 1.30;
+    reach = 1.05 + uMid * 0.08;
   } else if (uState > 4.5) {
     stateSpeed = 0.45;
-    warp = 0.64;
-    pulse = 0.74;
+    warp = 0.66;
+    reach = 0.96;
   }
-
-  vAlong = aSeed.x;
 
   if (uLayer < 0.5) {
     float radius = max(length(p), 0.0001);
     vec3 n = p / radius;
-    float field = fieldNoise(n + p * 0.31, t * stateSpeed);
     vec3 flow = flowField(p, t * stateSpeed + aSeed.x * 1.8);
+    float noise = organicNoise(n + p * 0.3, t * stateSpeed);
 
-    p += flow * (0.022 + 0.034 * uEnergy) * warp;
-    p += n * field * (0.033 + 0.058 * uEnergy) * warp;
+    p += flow * (0.020 + uEnergy * 0.034) * warp;
+    p += n * noise * (0.030 + uEnergy * 0.055) * warp;
 
-    float breathe = 1.0 + sin(t * 1.05 + aSeed.y * 4.2) * 0.011 * pulse + uBass * 0.064;
+    float breathe = 1.0 + sin(t * 1.05 + aSeed.y * 4.0) * 0.010 + uBass * 0.060;
     p *= breathe;
 
-    p.x *= 0.91 + sin(t * 0.34 + aSeed.z * 2.0) * 0.070 + uMid * 0.026;
-    p.y *= 1.04 + cos(t * 0.29 + aSeed.w * 2.4) * 0.082 + uBass * 0.032;
-    p.z *= 0.89 + sin(t * 0.27 + aSeed.y * 3.0) * 0.068;
+    p.x *= 0.90 + sin(t * 0.34 + aSeed.z * 2.0) * 0.065 + uMid * 0.024;
+    p.y *= 1.05 + cos(t * 0.29 + aSeed.w * 2.4) * 0.075 + uBass * 0.030;
+    p.z *= 0.88 + sin(t * 0.27 + aSeed.y * 3.0) * 0.060;
 
-    float localSpin = (0.10 + (1.0 - clamp(radius, 0.0, 1.2)) * 0.17) * stateSpeed;
-    p.xz = rot(t * localSpin + field * 0.11) * p.xz;
-    p.xy = rot(sin(t * 0.22 + aSeed.w * 5.0) * 0.050) * p.xy;
+    float localSpin = (0.09 + (1.0 - clamp(radius, 0.0, 1.2)) * 0.16) * stateSpeed;
+    p.xz = rot(t * localSpin + noise * 0.10) * p.xz;
 
     if (uState > 0.5 && uState < 1.5) {
-      float petal = sin(atan(p.y, p.x) * 5.0 + t * 1.55) * (uMid * 0.058 + uHigh * 0.022);
-      p += normalize(p + vec3(0.001)) * petal;
+      float voiceWave = sin(atan(p.y, p.x) * 5.0 + t * 1.6) * (uMid * 0.055 + uHigh * 0.020);
+      p += normalize(p + vec3(0.001)) * voiceWave;
     }
 
     if (uState > 1.5 && uState < 3.5) {
       float side = p.x >= 0.0 ? 1.0 : -1.0;
-      float splitStrength = (uState > 2.5 ? 0.098 : 0.064) + uEnergy * 0.026;
-      p.x += side * splitStrength * (0.32 + 0.68 * smoothstep(0.20, 1.0, radius));
-      p.yz = rot(side * t * 0.20 * stateSpeed) * p.yz;
+      p.x += side * (0.050 + uEnergy * 0.035) * smoothstep(0.20, 1.0, radius);
+      p.yz = rot(side * t * 0.18 * stateSpeed) * p.yz;
     }
 
     if (uState > 3.5 && uState < 4.5) {
-      float wave = sin(p.y * 10.5 - t * 7.7 + aSeed.z * 2.0) * (0.023 + uMid * 0.078);
-      p.x += wave;
-      p.z += cos(p.x * 8.7 - t * 5.8) * uHigh * 0.029;
+      float speech = sin(p.y * 10.0 - t * 7.6 + aSeed.z * 2.0) * (0.020 + uMid * 0.075);
+      p.x += speech;
+      p.z += cos(p.x * 8.4 - t * 5.7) * uHigh * 0.028;
     }
 
-    float wispGate = smoothstep(0.87, 0.985, aSeed.x);
-    float wispPulse = 0.5 + 0.5 * sin(t * (1.0 + stateSpeed) + aSeed.z * 11.0);
-    p += normalize(p + vec3(0.001)) * wispGate * wispPulse * (0.035 + uEnergy * 0.12);
-    p += flow * wispGate * (0.025 + uHigh * 0.055);
+    float wisp = smoothstep(0.90, 0.995, aSeed.w);
+    p += normalize(p + vec3(0.001)) * wisp * (0.025 + uEnergy * 0.10) * (0.5 + 0.5 * sin(t * 1.4 + aSeed.z * 10.0));
   } else if (uLayer < 1.5) {
-    float orbit = t * (0.085 + aSeed.y * 0.28) * stateSpeed + aSeed.z * 6.283185;
+    float orbit = t * (0.08 + aSeed.y * 0.28) * stateSpeed + aSeed.z * 6.283185;
     p.xz = rot(orbit) * p.xz;
-    p.xy = rot(sin(t * 0.12 + aSeed.w * 5.0) * (0.065 + aSeed.x * 0.09)) * p.xy;
+    p.xy = rot(sin(t * 0.12 + aSeed.w * 5.0) * (0.055 + aSeed.x * 0.08)) * p.xy;
 
     vec3 flow = flowField(p * 0.52, t * 0.62 + aSeed.y * 3.0);
-    p += flow * (0.024 + uEnergy * 0.032 + uHigh * 0.034);
-    p.y += sin(t * (0.40 + aSeed.w * 0.70) + aSeed.x * 9.0) * (0.030 + uMid * 0.050);
+    p += flow * (0.020 + uEnergy * 0.030 + uHigh * 0.030);
+    p.y += sin(t * (0.40 + aSeed.w * 0.70) + aSeed.x * 9.0) * (0.026 + uMid * 0.045);
 
-    float band = sin(atan(p.z, p.x) * 3.0 + t * 0.34 + aSeed.z * 5.0);
-    p.y += band * (0.028 + uEnergy * 0.020);
-
-    if (uState > 1.5 && uState < 3.5) p *= 1.0 - (0.045 + uEnergy * 0.020);
-    if (uState > 0.5 && uState < 1.5) p *= 1.0 + uBass * 0.020;
+    if (uState > 1.5 && uState < 3.5) p *= 0.96;
+    if (uState > 0.5 && uState < 1.5) p *= 1.0 + uBass * 0.018;
   } else {
-    float along = clamp(aSeed.x, 0.0, 1.0);
     float phase = aSeed.y * 6.283185;
     vec3 direction = normalize(p + vec3(0.001));
-    vec3 flow = flowField(p * 0.80, t * 0.85 + phase);
+    vec3 flow = flowField(p * 0.78, t * 0.82 + phase);
+    float wave = sin(along * 17.0 - t * (2.2 + stateSpeed) + phase * 2.0);
+    float flutter = cos(along * 9.0 + t * 0.70 + phase);
 
-    float travelling = sin(along * 18.0 - t * (2.4 + stateSpeed) + phase * 2.0);
-    float flutter = sin(along * 9.0 + t * 0.72 + phase);
-    float stateReach = 1.0;
-    if (uState > 0.5 && uState < 1.5) stateReach = 1.0 + uBass * 0.10 + uMid * 0.06;
-    if (uState > 1.5 && uState < 3.5) stateReach = 1.08 + uEnergy * 0.11;
-    if (uState > 3.5 && uState < 4.5) stateReach = 1.02 + uMid * 0.08;
-
-    p *= mix(0.96, stateReach, smoothstep(0.12, 1.0, along));
-    p += flow * (0.010 + along * 0.026 + uMid * 0.020);
-    p += direction * travelling * (0.006 + along * 0.020 + uHigh * 0.018);
-    p.y += flutter * (0.006 + along * 0.014);
-
-    if (uState > 3.5 && uState < 4.5) {
-      p += direction * (0.5 + 0.5 * travelling) * uMid * 0.030;
-    }
+    p *= mix(0.98, reach, smoothstep(0.10, 1.0, along));
+    p += flow * (0.008 + along * 0.024 + uMid * 0.018);
+    p += direction * wave * (0.005 + along * 0.018 + uHigh * 0.016);
+    p.y += flutter * (0.005 + along * 0.012);
   }
 
-  float yaw = t * (0.036 + uEnergy * 0.050) * stateSpeed + uMouse.x * 0.10;
-  float pitch = sin(t * 0.17) * 0.050 + uMouse.y * 0.070;
+  float yaw = t * (0.034 + uEnergy * 0.048) * stateSpeed + uMouse.x * 0.10;
+  float pitch = sin(t * 0.17) * 0.046 + uMouse.y * 0.068;
   p.xz = rot(yaw) * p.xz;
   p.yz = rot(pitch) * p.yz;
 
-  float cameraZ = 4.08 + p.z;
-  float persp = 3.00 / max(cameraZ, 0.52);
-  float worldScale = uLayer < 0.5 ? 0.61 : (uLayer < 1.5 ? 0.50 : 0.58);
+  float cameraZ = 4.05 + p.z;
+  float persp = 3.02 / max(cameraZ, 0.52);
+  float worldScale = uLayer < 0.5 ? 0.62 : (uLayer < 1.5 ? 0.50 : 0.58);
   vec2 screen = vec2((p.x * persp * worldScale) / uAspect, p.y * persp * worldScale);
   screen.y += 0.075;
   gl_Position = vec4(screen, 0.0, 1.0);
 
   float front = clamp((p.z + 1.9) / 3.8, 0.10, 1.0);
   float radial = length(p);
-  float coreBoost = uLayer < 0.5 ? (1.0 - smoothstep(0.10, 0.52, radial)) : 0.0;
+  float coreBoost = uLayer < 0.5 ? 1.0 - smoothstep(0.12, 0.55, radial) : 0.0;
 
-  float sizeBase = mix(0.92, 2.70, aSeed.y);
+  float sizeBase = mix(0.95, 2.75, aSeed.y);
   if (uLayer > 0.5 && uLayer < 1.5) sizeBase *= 0.60;
-  if (uLayer > 1.5) sizeBase = mix(0.58, 1.42, aSeed.z) * mix(0.72, 1.0, 1.0 - along);
-  sizeBase *= 1.0 + uEnergy * 0.16 + uHigh * 0.20 + coreBoost * 0.08;
-  sizeBase *= mix(1.0, uLayer > 1.5 ? 3.4 : 3.0, uGlowPass);
+  if (uLayer > 1.5) sizeBase = mix(0.60, 1.48, aSeed.z) * mix(1.0, 0.72, along);
+  sizeBase *= 1.0 + uEnergy * 0.16 + uHigh * 0.20 + coreBoost * 0.10;
+  sizeBase *= mix(1.0, uLayer > 1.5 ? 3.35 : 3.0, uGlowPass);
   gl_PointSize = sizeBase * uPixelRatio * (0.82 + persp * 0.32);
 
   float flicker = 0.78 + 0.22 * sin(t * (1.25 + uEnergy * 2.8) + aSeed.z * 12.0);
-  float densityFade = uLayer < 0.5 ? mix(0.82, 1.0, smoothstep(0.0, 1.05, radial)) : 1.0;
-  vAlpha = front * flicker * densityFade * mix(0.56, 0.96, aSeed.w);
-  if (uLayer < 0.5) vAlpha *= 1.0 + coreBoost * 0.14;
+  vAlpha = front * flicker * mix(0.58, 0.96, aSeed.w);
+  if (uLayer < 0.5) vAlpha *= 0.86 + coreBoost * 0.28;
   if (uLayer > 0.5 && uLayer < 1.5) vAlpha *= 0.22 + uEnergy * 0.22;
   if (uLayer > 1.5) {
-    float taper = smoothstep(0.0, 0.12, along) * (1.0 - smoothstep(0.76, 1.0, along));
-    vAlpha *= taper * (0.52 + uEnergy * 0.20);
+    float taper = smoothstep(0.0, 0.10, along) * (1.0 - smoothstep(0.82, 1.0, along));
+    vAlpha *= taper * (0.56 + uEnergy * 0.22);
   }
   if (uGlowPass > 0.5) vAlpha *= uLayer > 1.5 ? 0.13 : 0.09;
 
-  vHeat = clamp(0.30 + front * 0.42 + uEnergy * 0.22 + uBass * 0.12 + coreBoost * 0.16, 0.0, 1.0);
+  vHeat = clamp(0.30 + front * 0.44 + uEnergy * 0.22 + uBass * 0.12 + coreBoost * 0.18, 0.0, 1.0);
   vLayer = uLayer;
-  vSpark = smoothstep(0.86, 1.0, aSeed.z) * (0.34 + uHigh * 0.68);
-  vCoreBoost = coreBoost;
+  vAlong = along;
+  vSpark = smoothstep(0.88, 1.0, aSeed.z) * (0.30 + uHigh * 0.70);
 }
 `;
 
@@ -210,9 +191,8 @@ precision highp float;
 in float vAlpha;
 in float vHeat;
 in float vLayer;
-in float vSpark;
-in float vCoreBoost;
 in float vAlong;
+in float vSpark;
 out vec4 outColor;
 
 void main() {
@@ -223,16 +203,15 @@ void main() {
   if (halo <= 0.002) discard;
 
   vec3 deep = vec3(0.035, 0.30, 0.52);
-  vec3 cyan = vec3(0.10, 0.72, 0.96);
-  vec3 electric = vec3(0.40, 0.91, 1.0);
+  vec3 cyan = vec3(0.10, 0.73, 0.97);
+  vec3 electric = vec3(0.43, 0.92, 1.0);
   vec3 color = mix(deep, cyan, vHeat);
-  float electricMix = clamp(pointCore * 0.19 + vSpark * 0.12 + vCoreBoost * 0.08, 0.0, 0.35);
-  color = mix(color, electric, electricMix);
+  color = mix(color, electric, clamp(pointCore * 0.18 + vSpark * 0.10, 0.0, 0.34));
 
-  if (vLayer > 0.5 && vLayer < 1.5) color *= vec3(0.67, 0.92, 1.08);
+  if (vLayer > 0.5 && vLayer < 1.5) color *= vec3(0.68, 0.93, 1.08);
   if (vLayer > 1.5) {
-    float pulseColor = 0.30 + 0.20 * sin(vAlong * 14.0);
-    color = mix(color, vec3(0.30, 0.88, 1.0), pulseColor);
+    float filamentPulse = 0.30 + 0.14 * sin(vAlong * 16.0);
+    color = mix(color, vec3(0.30, 0.88, 1.0), filamentPulse);
   }
 
   float alpha = halo * vAlpha * (0.48 + pointCore * 0.62 + vSpark * 0.10);
@@ -288,8 +267,8 @@ function randomDirection() {
 }
 
 function normalize3(v) {
-  const length = Math.hypot(v[0], v[1], v[2]) || 1;
-  return [v[0] / length, v[1] / length, v[2] / length];
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
 }
 
 function cross3(a, b) {
@@ -297,6 +276,17 @@ function cross3(a, b) {
     a[1] * b[2] - a[2] * b[1],
     a[2] * b[0] - a[0] * b[2],
     a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function cubicBezier(a, b, c, d, t) {
+  const mt = 1 - t;
+  const mt2 = mt * mt;
+  const t2 = t * t;
+  return [
+    a[0] * mt2 * mt + 3 * b[0] * mt2 * t + 3 * c[0] * mt * t2 + d[0] * t2 * t,
+    a[1] * mt2 * mt + 3 * b[1] * mt2 * t + 3 * c[1] * mt * t2 + d[1] * t2 * t,
+    a[2] * mt2 * mt + 3 * b[2] * mt2 * t + 3 * c[2] * mt * t2 + d[2] * t2 * t,
   ];
 }
 
@@ -308,7 +298,7 @@ function buildCoreParticles(count) {
     const dir = randomDirection();
     const group = Math.random();
     let radius;
-    if (group < 0.57) radius = 0.10 + Math.pow(Math.random(), 0.80) * 0.58;
+    if (group < 0.58) radius = 0.10 + Math.pow(Math.random(), 0.78) * 0.58;
     else if (group < 0.91) radius = 0.55 + Math.pow(Math.random(), 0.58) * 0.43;
     else radius = 0.89 + Math.random() * 0.24;
 
@@ -331,13 +321,12 @@ function buildSwarmParticles(count) {
   for (let i = 0; i < count; i += 1) {
     const angle = Math.random() * Math.PI * 2;
     const radius = 1.10 + Math.pow(Math.random(), 0.46) * 3.0;
-    const bandIndex = i % 6;
-    const bandOffset = (bandIndex - 2.5) * 0.12;
-    const spiral = Math.sin(angle * (1.45 + bandIndex * 0.17) + bandIndex * 0.7) * 0.22;
-    const height = bandOffset + (Math.random() - 0.5) * 0.58;
+    const band = i % 6;
+    const bandOffset = (band - 2.5) * 0.12;
+    const spiral = Math.sin(angle * (1.45 + band * 0.17) + band * 0.7) * 0.22;
 
     positions[i * 3] = Math.cos(angle) * radius;
-    positions[i * 3 + 1] = height + spiral;
+    positions[i * 3 + 1] = bandOffset + spiral + (Math.random() - 0.5) * 0.58;
     positions[i * 3 + 2] = Math.sin(angle) * radius * (0.54 + Math.random() * 0.42);
 
     seeds[i * 4] = Math.random();
@@ -346,17 +335,6 @@ function buildSwarmParticles(count) {
     seeds[i * 4 + 3] = Math.random();
   }
   return { positions, seeds };
-}
-
-function cubicBezier(a, b, c, d, t) {
-  const mt = 1 - t;
-  const mt2 = mt * mt;
-  const t2 = t * t;
-  return [
-    a[0] * mt2 * mt + 3 * b[0] * mt2 * t + 3 * c[0] * mt * t2 + d[0] * t2 * t,
-    a[1] * mt2 * mt + 3 * b[1] * mt2 * t + 3 * c[1] * mt * t2 + d[1] * t2 * t,
-    a[2] * mt2 * mt + 3 * b[2] * mt2 * t + 3 * c[2] * mt * t2 + d[2] * t2 * t,
-  ];
 }
 
 function buildFilamentParticles(count) {
@@ -370,36 +348,37 @@ function buildFilamentParticles(count) {
     const fallback = Math.abs(dir[1]) > 0.82 ? [1, 0, 0] : [0, 1, 0];
     const side = normalize3(cross3(dir, fallback));
     const side2 = normalize3(cross3(dir, side));
-    const startRadius = 0.48 + Math.random() * 0.20;
-    const reach = 1.30 + Math.random() * 0.95;
-    const bend = (Math.random() - 0.5) * 0.75;
+    const startRadius = 0.48 + Math.random() * 0.18;
+    const endRadius = 1.35 + Math.random() * 0.85;
+    const bend = (Math.random() - 0.5) * 0.72;
     const bend2 = (Math.random() - 0.5) * 0.48;
+
     const start = dir.map((v) => v * startRadius);
     const end = [
-      dir[0] * reach + side[0] * bend + side2[0] * bend2,
-      dir[1] * reach + side[1] * bend + side2[1] * bend2,
-      dir[2] * reach + side[2] * bend + side2[2] * bend2,
+      dir[0] * endRadius + side[0] * bend + side2[0] * bend2,
+      dir[1] * endRadius + side[1] * bend + side2[1] * bend2,
+      dir[2] * endRadius + side[2] * bend + side2[2] * bend2,
     ];
     const c1 = [
-      start[0] + dir[0] * 0.34 + side[0] * bend * 0.55,
-      start[1] + dir[1] * 0.34 + side[1] * bend * 0.55,
-      start[2] + dir[2] * 0.34 + side[2] * bend * 0.55,
+      start[0] + dir[0] * 0.32 + side[0] * bend * 0.58,
+      start[1] + dir[1] * 0.32 + side[1] * bend * 0.58,
+      start[2] + dir[2] * 0.32 + side[2] * bend * 0.58,
     ];
     const c2 = [
-      end[0] - dir[0] * 0.42 + side2[0] * bend2 * 0.75,
-      end[1] - dir[1] * 0.42 + side2[1] * bend2 * 0.75,
-      end[2] - dir[2] * 0.42 + side2[2] * bend2 * 0.75,
+      end[0] - dir[0] * 0.46 + side2[0] * bend2 * 0.80,
+      end[1] - dir[1] * 0.46 + side2[1] * bend2 * 0.80,
+      end[2] - dir[2] * 0.46 + side2[2] * bend2 * 0.80,
     ];
     return { start, c1, c2, end, index };
   });
 
   for (let i = 0; i < count; i += 1) {
     const filamentIndex = Math.min(filamentCount - 1, Math.floor(i / pointsPerFilament));
-    const localIndex = i % pointsPerFilament;
-    const u = localIndex / Math.max(1, pointsPerFilament - 1);
-    const filament = filaments[filamentIndex];
-    const p = cubicBezier(filament.start, filament.c1, filament.c2, filament.end, u);
-    const thickness = (0.010 + (1 - u) * 0.012) * (0.65 + Math.random() * 0.7);
+    const local = i % pointsPerFilament;
+    const u = local / Math.max(1, pointsPerFilament - 1);
+    const f = filaments[filamentIndex];
+    const p = cubicBezier(f.start, f.c1, f.c2, f.end, u);
+    const thickness = (0.008 + (1 - u) * 0.012) * (0.7 + Math.random() * 0.6);
 
     positions[i * 3] = p[0] + (Math.random() - 0.5) * thickness;
     positions[i * 3 + 1] = p[1] + (Math.random() - 0.5) * thickness;
@@ -410,7 +389,6 @@ function buildFilamentParticles(count) {
     seeds[i * 4 + 2] = Math.random();
     seeds[i * 4 + 3] = Math.random();
   }
-
   return { positions, seeds };
 }
 
@@ -457,6 +435,7 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
     let program;
     try {
       program = createProgram(gl);
+      canvas.dataset.webgl = 'ready';
     } catch (error) {
       console.error(error);
       canvas.dataset.webgl = 'shader-error';
@@ -492,7 +471,7 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
     let mouseY = 0;
     let smoothX = 0;
     let smoothY = 0;
-    let energy = 0.13;
+    let energy = 0.14;
     const start = performance.now();
 
     const resize = () => {
@@ -511,7 +490,6 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
       mouseY = (event.clientY / height - 0.5) * 2;
     };
 
-    gl.useProgram(program);
     gl.disable(gl.DEPTH_TEST);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
