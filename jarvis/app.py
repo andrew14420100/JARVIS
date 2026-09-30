@@ -39,6 +39,8 @@ def _build_brain_client():
             timeout_seconds=settings.request_timeout_seconds,
             app_name=settings.cloud_app_name,
             app_url=settings.cloud_app_url,
+            local_fallback_enabled=settings.lm_studio_fallback_enabled,
+            local_fallback_base_url=settings.lm_studio_base_url,
         )
     return LMStudioClient(settings.lm_studio_base_url, settings.request_timeout_seconds)
 
