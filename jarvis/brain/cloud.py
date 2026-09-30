@@ -172,12 +172,7 @@ class CloudAIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> bool:
-        """Use deep thinking only when the actual turn benefits from it.
-
-        Tools may stay available on every turn so Nemotron can still open apps or
-        inspect the PC. Their mere presence must not force expensive reasoning for
-        a greeting or a short conversational reply.
-        """
+        """Use deep thinking only when the actual turn benefits from it."""
         if not tools:
             return False
         text = cls._latest_user_text(messages)
@@ -192,6 +187,35 @@ class CloudAIClient:
         )
         return any(marker in text for marker in deep_markers)
 
+    @classmethod
+    def _should_offer_tools(
+        cls,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> bool:
+        """Do not send the entire tool schema during ordinary voice chat.
+
+        Tool schemas are large and add avoidable latency. Conversational turns
+        therefore stay lightweight, while operational/deep requests still get
+        the full agent toolset.
+        """
+        if not tools:
+            return False
+        text = cls._latest_user_text(messages)
+        if not text:
+            return False
+        markers = (
+            "apri", "chiudi", "avvia", "ferma", "stoppa", "riavvia",
+            "controlla", "verifica", "cerca", "trova", "scarica", "installa",
+            "disinstalla", "modifica", "cambia", "crea", "elimina", "cancella",
+            "sposta", "rinomina", "salva", "carica", "invia", "manda", "scrivi",
+            "pubblica", "esegui", "lancia", "compra", "ordina", "prenota",
+            "analizza", "debug", "correggi", "progetta", "pianifica",
+            "confronta", "ottimizza", "investiga", "diagnostica", "implementa",
+            "testa", "github", "browser", "file", "cartella", "sito", "pc",
+        )
+        return any(marker in text for marker in markers)
+
     def chat_completion(
         self,
         *,
@@ -202,6 +226,7 @@ class CloudAIClient:
     ) -> dict[str, Any]:
         del model  # each provider is pinned to its own free-only model id.
         errors: list[str] = []
+        selected_tools = tools if self._should_offer_tools(messages, tools) else None
 
         for provider in self._configured_or_raise():
             payload: dict[str, Any] = {
@@ -213,10 +238,10 @@ class CloudAIClient:
                 payload.update(provider.extra_body)
             if provider.supports_dynamic_thinking:
                 payload["chat_template_kwargs"] = {
-                    "enable_thinking": self._is_agentic_request(messages, tools)
+                    "enable_thinking": self._is_agentic_request(messages, selected_tools)
                 }
-            if tools:
-                payload["tools"] = tools
+            if selected_tools:
+                payload["tools"] = selected_tools
                 payload["tool_choice"] = "auto"
 
             try:
