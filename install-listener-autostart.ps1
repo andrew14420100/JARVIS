@@ -36,13 +36,15 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-Register-ScheduledTask \
-    -TaskName $taskName \
-    -Action $action \
-    -Trigger $trigger \
-    -Settings $settings \
-    -Description "JARVIS always-on wake word and conversational microphone listener" \
-    -Force | Out-Null
+$taskParams = @{
+    TaskName = $taskName
+    Action = $action
+    Trigger = $trigger
+    Settings = $settings
+    Description = "JARVIS always-on wake word and conversational microphone listener"
+    Force = $true
+}
+Register-ScheduledTask @taskParams | Out-Null
 
 Write-Host "[JARVIS] Avvio automatico installato: $taskName"
 Write-Host "[JARVIS] Il listener partirà automaticamente all'accesso a Windows."
