@@ -1,7 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 
-const CORE_PARTICLES = 20000;
-const SWARM_PARTICLES = 8000;
+const CORE_PARTICLES = 18000;
+const SWARM_PARTICLES = 6000;
+const FILAMENT_PARTICLES = 4000;
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -84,30 +85,25 @@ void main() {
     float field = hashField(n + p * 0.34, t * stateSpeed);
     vec3 flow = flowField(p, t * stateSpeed + aSeed.x * 2.0);
 
-    // Fluid, non-spherical breathing body.
     p += flow * (0.024 + 0.036 * uEnergy) * warp;
     p += n * field * (0.036 + 0.064 * uEnergy) * warp;
 
     float breathe = 1.0 + sin(t * 1.12 + aSeed.y * 4.5) * 0.012 * pulse + uBass * 0.070;
     p *= breathe;
 
-    // More obvious asymmetry so the core does not read as a planet.
     p.x *= 0.90 + sin(t * 0.37 + aSeed.z * 2.0) * 0.075 + uMid * 0.030;
     p.y *= 1.05 + cos(t * 0.31 + aSeed.w * 2.5) * 0.090 + uBass * 0.035;
     p.z *= 0.88 + sin(t * 0.29 + aSeed.y * 3.0) * 0.075;
 
-    // Local vortex: inner and outer particles rotate at different speeds.
     float localSpin = (0.11 + (1.0 - clamp(radius, 0.0, 1.2)) * 0.18) * stateSpeed;
     p.xz = rot(t * localSpin + field * 0.13) * p.xz;
     p.xy = rot(sin(t * 0.24 + aSeed.w * 5.0) * 0.055) * p.xy;
 
-    // LISTENING: sound opens soft petals on the surface.
     if (uState > 0.5 && uState < 1.5) {
       float petal = sin(atan(p.y, p.x) * 5.0 + t * 1.6) * (uMid * 0.062 + uHigh * 0.024);
       p += normalize(p + vec3(0.001)) * petal;
     }
 
-    // THINKING / EXECUTING: split the intelligence core into counter-moving lobes.
     if (uState > 1.5 && uState < 3.5) {
       float side = p.x >= 0.0 ? 1.0 : -1.0;
       float splitStrength = (uState > 2.5 ? 0.108 : 0.070) + uEnergy * 0.030;
@@ -115,31 +111,17 @@ void main() {
       p.yz = rot(side * t * 0.22 * stateSpeed) * p.yz;
     }
 
-    // SPEAKING: travelling wave follows Jarvis voice energy.
     if (uState > 3.5 && uState < 4.5) {
       float wave = sin(p.y * 11.0 - t * 8.0 + aSeed.z * 2.0) * (0.026 + uMid * 0.085);
       p.x += wave;
       p.z += cos(p.x * 9.0 - t * 6.0) * uHigh * 0.032;
     }
 
-    // Detached wisps.
     float wispGate = smoothstep(0.84, 0.982, aSeed.x);
     float wispPulse = 0.5 + 0.5 * sin(t * (1.1 + stateSpeed) + aSeed.z * 12.0);
     p += normalize(p + vec3(0.001)) * wispGate * wispPulse * (0.045 + uEnergy * 0.15);
     p += flow * wispGate * (0.032 + uHigh * 0.070);
-
-    // A smaller subset becomes long neural tendrils instead of random dust.
-    float tendrilGate = smoothstep(0.94, 0.997, aSeed.w);
-    vec3 tendrilDirection = normalize(flow + n * 0.42 + vec3(
-      sin(aSeed.y * 17.0 + t * 0.5),
-      cos(aSeed.z * 19.0 - t * 0.4),
-      sin(aSeed.x * 13.0 + t * 0.35)
-    ) * 0.22);
-    float tendrilPulse = 0.45 + 0.55 * sin(t * (0.9 + stateSpeed) + aSeed.x * 18.0);
-    float tendrilLength = tendrilGate * tendrilPulse * (0.10 + uEnergy * 0.28 + uMid * 0.10);
-    p += tendrilDirection * tendrilLength;
-  } else {
-    // Free particle swarm around the intelligence body.
+  } else if (uLayer < 1.5) {
     float orbit = t * (0.10 + aSeed.y * 0.34) * stateSpeed + aSeed.z * 6.283185;
     p.xz = rot(orbit) * p.xz;
     p.xy = rot(sin(t * 0.13 + aSeed.w * 5.0) * (0.08 + aSeed.x * 0.12)) * p.xy;
@@ -148,16 +130,38 @@ void main() {
     p += flow * (0.030 + uEnergy * 0.042 + uHigh * 0.042);
     p.y += sin(t * (0.45 + aSeed.w * 0.8) + aSeed.x * 9.0) * (0.040 + uMid * 0.070);
 
-    // Make the swarm form loose streaming bands rather than a uniform fog.
     float band = sin(atan(p.z, p.x) * 3.0 + t * 0.38 + aSeed.z * 5.0);
     p.y += band * (0.035 + uEnergy * 0.025);
 
     if (uState > 1.5 && uState < 3.5) {
-      float attract = 1.0 - (0.055 + uEnergy * 0.025);
-      p *= attract;
+      p *= 1.0 - (0.055 + uEnergy * 0.025);
     }
     if (uState > 0.5 && uState < 1.5) {
       p *= 1.0 + uBass * 0.025;
+    }
+  } else {
+    // Dedicated neural filaments: coherent curves, not random dust.
+    float along = aSeed.x;
+    float strand = aSeed.y;
+    float phase = strand * 6.283185;
+    float wave = sin(along * 15.0 - t * (1.0 + stateSpeed) + phase * 2.0);
+    float pulseWave = 0.5 + 0.5 * sin(along * 20.0 - t * 4.0 + phase);
+
+    p += normalize(p + vec3(0.001)) * wave * (0.018 + uMid * 0.045);
+    p.y += cos(along * 12.0 + t * 0.7 + phase) * (0.015 + uHigh * 0.025);
+
+    float filamentSpin = t * (0.055 + strand * 0.045) * stateSpeed;
+    p.xz = rot(filamentSpin) * p.xz;
+    p.xy = rot(sin(t * 0.20 + phase) * 0.08) * p.xy;
+
+    if (uState > 0.5 && uState < 1.5) {
+      p *= 1.0 + uBass * (0.018 + along * 0.040);
+    }
+    if (uState > 1.5 && uState < 3.5) {
+      p *= 1.0 + (0.025 + uEnergy * 0.035) * along;
+    }
+    if (uState > 3.5 && uState < 4.5) {
+      p += normalize(p + vec3(0.001)) * pulseWave * uMid * 0.040;
     }
   }
 
@@ -168,30 +172,33 @@ void main() {
 
   float cameraZ = 4.15 + p.z;
   float persp = 2.96 / max(cameraZ, 0.5);
-  float worldScale = uLayer < 0.5 ? 0.59 : 0.52;
+  float worldScale = uLayer < 0.5 ? 0.59 : (uLayer < 1.5 ? 0.52 : 0.56);
   vec2 screen = vec2((p.x * persp * worldScale) / uAspect, p.y * persp * worldScale);
   screen.y += 0.078;
   gl_Position = vec4(screen, 0.0, 1.0);
 
   float front = clamp((p.z + 1.9) / 3.8, 0.08, 1.0);
   float radial = length(p);
-  float coreBoost = uLayer < 0.5 ? (1.0 - smoothstep(0.18, 0.72, radial)) : 0.0;
-  float sizeBase = mix(1.05, 3.10, aSeed.y);
-  if (uLayer > 0.5) sizeBase *= 0.64;
-  sizeBase *= 1.0 + uEnergy * 0.20 + uHigh * 0.26 + coreBoost * 0.34;
-  sizeBase *= mix(1.0, 3.35, uGlowPass);
+  float coreBoost = uLayer < 0.5 ? (1.0 - smoothstep(0.08, 0.46, radial)) : 0.0;
+
+  float sizeBase = mix(0.95, 2.85, aSeed.y);
+  if (uLayer > 0.5 && uLayer < 1.5) sizeBase *= 0.62;
+  if (uLayer > 1.5) sizeBase = mix(0.70, 1.75, aSeed.z);
+  sizeBase *= 1.0 + uEnergy * 0.18 + uHigh * 0.22 + coreBoost * 0.12;
+  sizeBase *= mix(1.0, uLayer > 1.5 ? 4.1 : 3.25, uGlowPass);
   gl_PointSize = sizeBase * uPixelRatio * (0.80 + persp * 0.34);
 
-  float flicker = 0.73 + 0.27 * sin(t * (1.35 + uEnergy * 3.2) + aSeed.z * 13.0);
+  float flicker = 0.75 + 0.25 * sin(t * (1.35 + uEnergy * 3.0) + aSeed.z * 13.0);
   float densityFade = uLayer < 0.5 ? mix(0.80, 1.0, smoothstep(0.0, 1.05, radial)) : 1.0;
-  vAlpha = front * flicker * densityFade * mix(0.54, 1.0, aSeed.w);
-  vAlpha *= 1.0 + coreBoost * 0.75;
-  if (uLayer > 0.5) vAlpha *= 0.34 + uEnergy * 0.30;
-  if (uGlowPass > 0.5) vAlpha *= 0.15;
+  vAlpha = front * flicker * densityFade * mix(0.52, 0.96, aSeed.w);
+  if (uLayer < 0.5) vAlpha *= 1.0 + coreBoost * 0.20;
+  if (uLayer > 0.5 && uLayer < 1.5) vAlpha *= 0.28 + uEnergy * 0.26;
+  if (uLayer > 1.5) vAlpha *= 0.58 + uEnergy * 0.24;
+  if (uGlowPass > 0.5) vAlpha *= uLayer > 1.5 ? 0.18 : 0.11;
 
-  vHeat = clamp(0.32 + front * 0.48 + uEnergy * 0.26 + uBass * 0.17 + coreBoost * 0.42, 0.0, 1.0);
+  vHeat = clamp(0.28 + front * 0.42 + uEnergy * 0.24 + uBass * 0.14 + coreBoost * 0.18, 0.0, 1.0);
   vLayer = uLayer;
-  vSpark = smoothstep(0.80, 1.0, aSeed.x) * (0.52 + uHigh * 0.9);
+  vSpark = smoothstep(0.82, 1.0, aSeed.z) * (0.42 + uHigh * 0.78);
   vCoreBoost = coreBoost;
 }
 `;
@@ -210,17 +217,20 @@ void main() {
   vec2 uv = gl_PointCoord - vec2(0.5);
   float d = length(uv) * 2.0;
   float halo = 1.0 - smoothstep(0.06, 1.0, d);
-  float core = 1.0 - smoothstep(0.0, 0.31, d);
+  float pointCore = 1.0 - smoothstep(0.0, 0.31, d);
   if (halo <= 0.002) discard;
 
-  vec3 deep = vec3(0.06, 0.42, 0.64);
-  vec3 cyan = vec3(0.20, 0.86, 1.0);
-  vec3 whiteHot = vec3(0.93, 1.0, 1.0);
+  vec3 deep = vec3(0.04, 0.35, 0.58);
+  vec3 cyan = vec3(0.12, 0.76, 0.98);
+  vec3 hotCyan = vec3(0.56, 0.96, 1.0);
   vec3 color = mix(deep, cyan, vHeat);
-  color = mix(color, whiteHot, clamp(core * 0.48 + vSpark * 0.22 + vCoreBoost * 0.28, 0.0, 0.86));
-  if (vLayer > 0.5) color *= vec3(0.70, 0.94, 1.10);
+  float hotMix = clamp(pointCore * 0.26 + vSpark * 0.14 + vCoreBoost * 0.10, 0.0, 0.48);
+  color = mix(color, hotCyan, hotMix);
 
-  float alpha = halo * vAlpha * (0.50 + core * 0.82 + vSpark * 0.16 + vCoreBoost * 0.20);
+  if (vLayer > 0.5 && vLayer < 1.5) color *= vec3(0.68, 0.92, 1.10);
+  if (vLayer > 1.5) color = mix(color, vec3(0.38, 0.92, 1.0), 0.46);
+
+  float alpha = halo * vAlpha * (0.46 + pointCore * 0.66 + vSpark * 0.12);
   outColor = vec4(color, alpha);
 }
 `;
@@ -280,12 +290,12 @@ function buildCoreParticles(count) {
     const dir = randomDirection();
     const group = Math.random();
     let radius;
-    if (group < 0.60) {
-      radius = 0.08 + Math.pow(Math.random(), 0.76) * 0.60;
+    if (group < 0.58) {
+      radius = 0.10 + Math.pow(Math.random(), 0.78) * 0.60;
     } else if (group < 0.91) {
       radius = 0.56 + Math.pow(Math.random(), 0.58) * 0.43;
     } else {
-      radius = 0.90 + Math.random() * 0.26;
+      radius = 0.90 + Math.random() * 0.25;
     }
 
     positions[i * 3] = dir[0] * radius * (0.88 + Math.random() * 0.13);
@@ -306,16 +316,47 @@ function buildSwarmParticles(count) {
 
   for (let i = 0; i < count; i += 1) {
     const angle = Math.random() * Math.PI * 2;
-    const radius = 1.10 + Math.pow(Math.random(), 0.42) * 3.25;
-    const spiral = Math.sin(angle * 2.3 + Math.random() * 2.2) * 0.40;
-    const height = (Math.random() - 0.5) * (1.55 + Math.random() * 1.9);
+    const radius = 1.12 + Math.pow(Math.random(), 0.43) * 3.18;
+    const bandIndex = i % 5;
+    const bandOffset = (bandIndex - 2) * 0.16;
+    const spiral = Math.sin(angle * (1.7 + bandIndex * 0.23) + bandIndex) * 0.28;
+    const height = bandOffset + (Math.random() - 0.5) * (0.72 + bandIndex * 0.08);
 
     positions[i * 3] = Math.cos(angle) * radius;
     positions[i * 3 + 1] = height + spiral;
-    positions[i * 3 + 2] = Math.sin(angle) * radius * (0.47 + Math.random() * 0.60);
+    positions[i * 3 + 2] = Math.sin(angle) * radius * (0.52 + Math.random() * 0.48);
 
     seeds[i * 4] = Math.random();
     seeds[i * 4 + 1] = Math.random();
+    seeds[i * 4 + 2] = Math.random();
+    seeds[i * 4 + 3] = Math.random();
+  }
+  return { positions, seeds };
+}
+
+function buildFilamentParticles(count) {
+  const positions = new Float32Array(count * 3);
+  const seeds = new Float32Array(count * 4);
+  const filamentCount = 20;
+  const pointsPerFilament = Math.ceil(count / filamentCount);
+
+  for (let i = 0; i < count; i += 1) {
+    const filament = Math.floor(i / pointsPerFilament);
+    const localIndex = i % pointsPerFilament;
+    const u = localIndex / Math.max(1, pointsPerFilament - 1);
+    const phase = (filament / filamentCount) * Math.PI * 2;
+    const twist = 1.25 + (filament % 4) * 0.34;
+    const radius = 0.52 + u * (1.02 + (filament % 3) * 0.17);
+    const angle = phase + u * twist;
+    const verticalBias = Math.sin(phase * 2.0) * 0.22;
+    const thickness = 0.018 + u * 0.010;
+
+    positions[i * 3] = Math.cos(angle) * radius + (Math.random() - 0.5) * thickness;
+    positions[i * 3 + 1] = verticalBias + Math.sin(u * Math.PI * 2.0 + phase) * (0.12 + u * 0.10) + (Math.random() - 0.5) * thickness;
+    positions[i * 3 + 2] = Math.sin(angle) * radius * 0.72 + Math.cos(u * Math.PI * 1.7 + phase) * 0.11 + (Math.random() - 0.5) * thickness;
+
+    seeds[i * 4] = u;
+    seeds[i * 4 + 1] = filament / filamentCount;
     seeds[i * 4 + 2] = Math.random();
     seeds[i * 4 + 3] = Math.random();
   }
@@ -373,8 +414,10 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
 
     const coreData = buildCoreParticles(CORE_PARTICLES);
     const swarmData = buildSwarmParticles(SWARM_PARTICLES);
+    const filamentData = buildFilamentParticles(FILAMENT_PARTICLES);
     const coreGpu = createParticleVao(gl, program, coreData);
     const swarmGpu = createParticleVao(gl, program, swarmData);
+    const filamentGpu = createParticleVao(gl, program, filamentData);
 
     const uniforms = {
       time: gl.getUniformLocation(program, 'uTime'),
@@ -439,7 +482,7 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
       const state = stateToCode(visualStateRef.current);
       const audio = audioLevelRef.current || 0;
       const bands = audioBandsRef.current || { bass: 0, mid: 0, high: 0 };
-      const baseEnergy = state === 0 ? 0.15 : state === 1 ? 0.42 : state === 2 ? 0.78 : state === 3 ? 0.96 : state === 4 ? 0.64 : 0.28;
+      const baseEnergy = state === 0 ? 0.14 : state === 1 ? 0.42 : state === 2 ? 0.78 : state === 3 ? 0.96 : state === 4 ? 0.64 : 0.28;
       const targetEnergy = Math.min(1.40, baseEnergy + audio * 0.64 + (bands.bass || 0) * 0.20);
       energy += (targetEnergy - energy) * 0.068;
       smoothX += (mouseX - smoothX) * 0.025;
@@ -458,6 +501,7 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
       gl.uniform2f(uniforms.mouse, smoothX, smoothY);
 
       drawLayer(swarmGpu, SWARM_PARTICLES, 1.0);
+      drawLayer(filamentGpu, FILAMENT_PARTICLES, 2.0);
       drawLayer(coreGpu, CORE_PARTICLES, 0.0);
 
       gl.bindVertexArray(null);
@@ -473,7 +517,7 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', resize);
       window.removeEventListener('pointermove', onPointerMove);
-      [coreGpu, swarmGpu].forEach((gpu) => {
+      [coreGpu, swarmGpu, filamentGpu].forEach((gpu) => {
         gl.deleteBuffer(gpu.positionBuffer);
         gl.deleteBuffer(gpu.seedBuffer);
         gl.deleteVertexArray(gpu.vao);
