@@ -1,8 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 
-const CORE_PARTICLES = 18000;
-const SWARM_PARTICLES = 6000;
+const CORE_PARTICLES = 17000;
+const SWARM_PARTICLES = 7000;
 const FILAMENT_PARTICLES = 4000;
+
+export const WEBGL_PARTICLE_COUNT = CORE_PARTICLES + SWARM_PARTICLES + FILAMENT_PARTICLES;
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -27,6 +29,7 @@ out float vHeat;
 out float vLayer;
 out float vSpark;
 out float vCoreBoost;
+out float vAlong;
 
 mat2 rot(float a) {
   float c = cos(a);
@@ -34,171 +37,169 @@ mat2 rot(float a) {
   return mat2(c, -s, s, c);
 }
 
-float hashField(vec3 p, float t) {
-  float a = sin(dot(p, vec3(2.71, 4.13, 3.37)) * 2.2 + t * 0.61 + aSeed.y * 8.0);
-  float b = cos(dot(p.yzx, vec3(5.19, 2.47, 4.61)) * 1.65 - t * 0.43 + aSeed.z * 7.0);
-  float c = sin((p.x - p.z) * 7.3 + p.y * 4.7 + t * 0.31 + aSeed.w * 9.0);
+float fieldNoise(vec3 p, float t) {
+  float a = sin(dot(p, vec3(2.71, 4.13, 3.37)) * 2.0 + t * 0.59 + aSeed.y * 7.0);
+  float b = cos(dot(p.yzx, vec3(5.19, 2.47, 4.61)) * 1.55 - t * 0.43 + aSeed.z * 6.0);
+  float c = sin((p.x - p.z) * 7.1 + p.y * 4.5 + t * 0.29 + aSeed.w * 8.0);
   return a * 0.50 + b * 0.31 + c * 0.19;
 }
 
 vec3 flowField(vec3 p, float t) {
-  vec3 q = p * 3.2;
+  vec3 q = p * 3.0;
   return vec3(
-    sin(q.y + t * 0.73) + cos(q.z * 1.31 - t * 0.41),
-    sin(q.z * 1.17 - t * 0.57) + cos(q.x * 1.29 + t * 0.36),
-    sin(q.x * 1.23 + t * 0.49) + cos(q.y * 1.37 - t * 0.32)
+    sin(q.y + t * 0.72) + cos(q.z * 1.27 - t * 0.39),
+    sin(q.z * 1.13 - t * 0.55) + cos(q.x * 1.25 + t * 0.34),
+    sin(q.x * 1.19 + t * 0.47) + cos(q.y * 1.31 - t * 0.30)
   ) * 0.5;
 }
 
 void main() {
   float t = uTime;
   vec3 p = aPosition;
-  float stateSpeed = 0.72;
-  float warp = 0.84;
-  float pulse = 0.88;
+  float stateSpeed = 0.70;
+  float warp = 0.82;
+  float pulse = 0.86;
 
   if (uState > 0.5 && uState < 1.5) {
-    stateSpeed = 1.10;
-    warp = 1.12;
-    pulse = 1.10;
+    stateSpeed = 1.12;
+    warp = 1.16;
+    pulse = 1.12;
   } else if (uState > 1.5 && uState < 2.5) {
-    stateSpeed = 2.10;
-    warp = 1.62;
-    pulse = 1.30;
+    stateSpeed = 2.05;
+    warp = 1.58;
+    pulse = 1.28;
   } else if (uState > 2.5 && uState < 3.5) {
-    stateSpeed = 2.65;
-    warp = 1.92;
-    pulse = 1.45;
+    stateSpeed = 2.55;
+    warp = 1.88;
+    pulse = 1.42;
   } else if (uState > 3.5 && uState < 4.5) {
-    stateSpeed = 1.45;
-    warp = 1.30;
-    pulse = 1.22;
+    stateSpeed = 1.52;
+    warp = 1.32;
+    pulse = 1.24;
   } else if (uState > 4.5) {
-    stateSpeed = 0.42;
-    warp = 0.62;
-    pulse = 0.72;
+    stateSpeed = 0.45;
+    warp = 0.64;
+    pulse = 0.74;
   }
+
+  vAlong = aSeed.x;
 
   if (uLayer < 0.5) {
     float radius = max(length(p), 0.0001);
     vec3 n = p / radius;
-    float field = hashField(n + p * 0.34, t * stateSpeed);
-    vec3 flow = flowField(p, t * stateSpeed + aSeed.x * 2.0);
+    float field = fieldNoise(n + p * 0.31, t * stateSpeed);
+    vec3 flow = flowField(p, t * stateSpeed + aSeed.x * 1.8);
 
-    p += flow * (0.024 + 0.036 * uEnergy) * warp;
-    p += n * field * (0.036 + 0.064 * uEnergy) * warp;
+    p += flow * (0.022 + 0.034 * uEnergy) * warp;
+    p += n * field * (0.033 + 0.058 * uEnergy) * warp;
 
-    float breathe = 1.0 + sin(t * 1.12 + aSeed.y * 4.5) * 0.012 * pulse + uBass * 0.070;
+    float breathe = 1.0 + sin(t * 1.05 + aSeed.y * 4.2) * 0.011 * pulse + uBass * 0.064;
     p *= breathe;
 
-    p.x *= 0.90 + sin(t * 0.37 + aSeed.z * 2.0) * 0.075 + uMid * 0.030;
-    p.y *= 1.05 + cos(t * 0.31 + aSeed.w * 2.5) * 0.090 + uBass * 0.035;
-    p.z *= 0.88 + sin(t * 0.29 + aSeed.y * 3.0) * 0.075;
+    p.x *= 0.91 + sin(t * 0.34 + aSeed.z * 2.0) * 0.070 + uMid * 0.026;
+    p.y *= 1.04 + cos(t * 0.29 + aSeed.w * 2.4) * 0.082 + uBass * 0.032;
+    p.z *= 0.89 + sin(t * 0.27 + aSeed.y * 3.0) * 0.068;
 
-    float localSpin = (0.11 + (1.0 - clamp(radius, 0.0, 1.2)) * 0.18) * stateSpeed;
-    p.xz = rot(t * localSpin + field * 0.13) * p.xz;
-    p.xy = rot(sin(t * 0.24 + aSeed.w * 5.0) * 0.055) * p.xy;
+    float localSpin = (0.10 + (1.0 - clamp(radius, 0.0, 1.2)) * 0.17) * stateSpeed;
+    p.xz = rot(t * localSpin + field * 0.11) * p.xz;
+    p.xy = rot(sin(t * 0.22 + aSeed.w * 5.0) * 0.050) * p.xy;
 
     if (uState > 0.5 && uState < 1.5) {
-      float petal = sin(atan(p.y, p.x) * 5.0 + t * 1.6) * (uMid * 0.062 + uHigh * 0.024);
+      float petal = sin(atan(p.y, p.x) * 5.0 + t * 1.55) * (uMid * 0.058 + uHigh * 0.022);
       p += normalize(p + vec3(0.001)) * petal;
     }
 
     if (uState > 1.5 && uState < 3.5) {
       float side = p.x >= 0.0 ? 1.0 : -1.0;
-      float splitStrength = (uState > 2.5 ? 0.108 : 0.070) + uEnergy * 0.030;
-      p.x += side * splitStrength * (0.35 + 0.65 * smoothstep(0.2, 1.0, radius));
-      p.yz = rot(side * t * 0.22 * stateSpeed) * p.yz;
+      float splitStrength = (uState > 2.5 ? 0.098 : 0.064) + uEnergy * 0.026;
+      p.x += side * splitStrength * (0.32 + 0.68 * smoothstep(0.20, 1.0, radius));
+      p.yz = rot(side * t * 0.20 * stateSpeed) * p.yz;
     }
 
     if (uState > 3.5 && uState < 4.5) {
-      float wave = sin(p.y * 11.0 - t * 8.0 + aSeed.z * 2.0) * (0.026 + uMid * 0.085);
+      float wave = sin(p.y * 10.5 - t * 7.7 + aSeed.z * 2.0) * (0.023 + uMid * 0.078);
       p.x += wave;
-      p.z += cos(p.x * 9.0 - t * 6.0) * uHigh * 0.032;
+      p.z += cos(p.x * 8.7 - t * 5.8) * uHigh * 0.029;
     }
 
-    float wispGate = smoothstep(0.84, 0.982, aSeed.x);
-    float wispPulse = 0.5 + 0.5 * sin(t * (1.1 + stateSpeed) + aSeed.z * 12.0);
-    p += normalize(p + vec3(0.001)) * wispGate * wispPulse * (0.045 + uEnergy * 0.15);
-    p += flow * wispGate * (0.032 + uHigh * 0.070);
+    float wispGate = smoothstep(0.87, 0.985, aSeed.x);
+    float wispPulse = 0.5 + 0.5 * sin(t * (1.0 + stateSpeed) + aSeed.z * 11.0);
+    p += normalize(p + vec3(0.001)) * wispGate * wispPulse * (0.035 + uEnergy * 0.12);
+    p += flow * wispGate * (0.025 + uHigh * 0.055);
   } else if (uLayer < 1.5) {
-    float orbit = t * (0.10 + aSeed.y * 0.34) * stateSpeed + aSeed.z * 6.283185;
+    float orbit = t * (0.085 + aSeed.y * 0.28) * stateSpeed + aSeed.z * 6.283185;
     p.xz = rot(orbit) * p.xz;
-    p.xy = rot(sin(t * 0.13 + aSeed.w * 5.0) * (0.08 + aSeed.x * 0.12)) * p.xy;
+    p.xy = rot(sin(t * 0.12 + aSeed.w * 5.0) * (0.065 + aSeed.x * 0.09)) * p.xy;
 
-    vec3 flow = flowField(p * 0.55, t * 0.68 + aSeed.y * 3.0);
-    p += flow * (0.030 + uEnergy * 0.042 + uHigh * 0.042);
-    p.y += sin(t * (0.45 + aSeed.w * 0.8) + aSeed.x * 9.0) * (0.040 + uMid * 0.070);
+    vec3 flow = flowField(p * 0.52, t * 0.62 + aSeed.y * 3.0);
+    p += flow * (0.024 + uEnergy * 0.032 + uHigh * 0.034);
+    p.y += sin(t * (0.40 + aSeed.w * 0.70) + aSeed.x * 9.0) * (0.030 + uMid * 0.050);
 
-    float band = sin(atan(p.z, p.x) * 3.0 + t * 0.38 + aSeed.z * 5.0);
-    p.y += band * (0.035 + uEnergy * 0.025);
+    float band = sin(atan(p.z, p.x) * 3.0 + t * 0.34 + aSeed.z * 5.0);
+    p.y += band * (0.028 + uEnergy * 0.020);
 
-    if (uState > 1.5 && uState < 3.5) {
-      p *= 1.0 - (0.055 + uEnergy * 0.025);
-    }
-    if (uState > 0.5 && uState < 1.5) {
-      p *= 1.0 + uBass * 0.025;
-    }
+    if (uState > 1.5 && uState < 3.5) p *= 1.0 - (0.045 + uEnergy * 0.020);
+    if (uState > 0.5 && uState < 1.5) p *= 1.0 + uBass * 0.020;
   } else {
-    // Dedicated neural filaments: coherent curves, not random dust.
-    float along = aSeed.x;
-    float strand = aSeed.y;
-    float phase = strand * 6.283185;
-    float wave = sin(along * 15.0 - t * (1.0 + stateSpeed) + phase * 2.0);
-    float pulseWave = 0.5 + 0.5 * sin(along * 20.0 - t * 4.0 + phase);
+    float along = clamp(aSeed.x, 0.0, 1.0);
+    float phase = aSeed.y * 6.283185;
+    vec3 direction = normalize(p + vec3(0.001));
+    vec3 flow = flowField(p * 0.80, t * 0.85 + phase);
 
-    p += normalize(p + vec3(0.001)) * wave * (0.018 + uMid * 0.045);
-    p.y += cos(along * 12.0 + t * 0.7 + phase) * (0.015 + uHigh * 0.025);
+    float travelling = sin(along * 18.0 - t * (2.4 + stateSpeed) + phase * 2.0);
+    float flutter = sin(along * 9.0 + t * 0.72 + phase);
+    float stateReach = 1.0;
+    if (uState > 0.5 && uState < 1.5) stateReach = 1.0 + uBass * 0.10 + uMid * 0.06;
+    if (uState > 1.5 && uState < 3.5) stateReach = 1.08 + uEnergy * 0.11;
+    if (uState > 3.5 && uState < 4.5) stateReach = 1.02 + uMid * 0.08;
 
-    float filamentSpin = t * (0.055 + strand * 0.045) * stateSpeed;
-    p.xz = rot(filamentSpin) * p.xz;
-    p.xy = rot(sin(t * 0.20 + phase) * 0.08) * p.xy;
+    p *= mix(0.96, stateReach, smoothstep(0.12, 1.0, along));
+    p += flow * (0.010 + along * 0.026 + uMid * 0.020);
+    p += direction * travelling * (0.006 + along * 0.020 + uHigh * 0.018);
+    p.y += flutter * (0.006 + along * 0.014);
 
-    if (uState > 0.5 && uState < 1.5) {
-      p *= 1.0 + uBass * (0.018 + along * 0.040);
-    }
-    if (uState > 1.5 && uState < 3.5) {
-      p *= 1.0 + (0.025 + uEnergy * 0.035) * along;
-    }
     if (uState > 3.5 && uState < 4.5) {
-      p += normalize(p + vec3(0.001)) * pulseWave * uMid * 0.040;
+      p += direction * (0.5 + 0.5 * travelling) * uMid * 0.030;
     }
   }
 
-  float yaw = t * (0.040 + uEnergy * 0.055) * stateSpeed + uMouse.x * 0.11;
-  float pitch = sin(t * 0.18) * 0.055 + uMouse.y * 0.075;
+  float yaw = t * (0.036 + uEnergy * 0.050) * stateSpeed + uMouse.x * 0.10;
+  float pitch = sin(t * 0.17) * 0.050 + uMouse.y * 0.070;
   p.xz = rot(yaw) * p.xz;
   p.yz = rot(pitch) * p.yz;
 
-  float cameraZ = 4.15 + p.z;
-  float persp = 2.96 / max(cameraZ, 0.5);
-  float worldScale = uLayer < 0.5 ? 0.59 : (uLayer < 1.5 ? 0.52 : 0.56);
+  float cameraZ = 4.08 + p.z;
+  float persp = 3.00 / max(cameraZ, 0.52);
+  float worldScale = uLayer < 0.5 ? 0.61 : (uLayer < 1.5 ? 0.50 : 0.58);
   vec2 screen = vec2((p.x * persp * worldScale) / uAspect, p.y * persp * worldScale);
-  screen.y += 0.078;
+  screen.y += 0.075;
   gl_Position = vec4(screen, 0.0, 1.0);
 
-  float front = clamp((p.z + 1.9) / 3.8, 0.08, 1.0);
+  float front = clamp((p.z + 1.9) / 3.8, 0.10, 1.0);
   float radial = length(p);
-  float coreBoost = uLayer < 0.5 ? (1.0 - smoothstep(0.08, 0.46, radial)) : 0.0;
+  float coreBoost = uLayer < 0.5 ? (1.0 - smoothstep(0.10, 0.52, radial)) : 0.0;
 
-  float sizeBase = mix(0.95, 2.85, aSeed.y);
-  if (uLayer > 0.5 && uLayer < 1.5) sizeBase *= 0.62;
-  if (uLayer > 1.5) sizeBase = mix(0.70, 1.75, aSeed.z);
-  sizeBase *= 1.0 + uEnergy * 0.18 + uHigh * 0.22 + coreBoost * 0.12;
-  sizeBase *= mix(1.0, uLayer > 1.5 ? 4.1 : 3.25, uGlowPass);
-  gl_PointSize = sizeBase * uPixelRatio * (0.80 + persp * 0.34);
+  float sizeBase = mix(0.92, 2.70, aSeed.y);
+  if (uLayer > 0.5 && uLayer < 1.5) sizeBase *= 0.60;
+  if (uLayer > 1.5) sizeBase = mix(0.58, 1.42, aSeed.z) * mix(0.72, 1.0, 1.0 - along);
+  sizeBase *= 1.0 + uEnergy * 0.16 + uHigh * 0.20 + coreBoost * 0.08;
+  sizeBase *= mix(1.0, uLayer > 1.5 ? 3.4 : 3.0, uGlowPass);
+  gl_PointSize = sizeBase * uPixelRatio * (0.82 + persp * 0.32);
 
-  float flicker = 0.75 + 0.25 * sin(t * (1.35 + uEnergy * 3.0) + aSeed.z * 13.0);
-  float densityFade = uLayer < 0.5 ? mix(0.80, 1.0, smoothstep(0.0, 1.05, radial)) : 1.0;
-  vAlpha = front * flicker * densityFade * mix(0.52, 0.96, aSeed.w);
-  if (uLayer < 0.5) vAlpha *= 1.0 + coreBoost * 0.20;
-  if (uLayer > 0.5 && uLayer < 1.5) vAlpha *= 0.28 + uEnergy * 0.26;
-  if (uLayer > 1.5) vAlpha *= 0.58 + uEnergy * 0.24;
-  if (uGlowPass > 0.5) vAlpha *= uLayer > 1.5 ? 0.18 : 0.11;
+  float flicker = 0.78 + 0.22 * sin(t * (1.25 + uEnergy * 2.8) + aSeed.z * 12.0);
+  float densityFade = uLayer < 0.5 ? mix(0.82, 1.0, smoothstep(0.0, 1.05, radial)) : 1.0;
+  vAlpha = front * flicker * densityFade * mix(0.56, 0.96, aSeed.w);
+  if (uLayer < 0.5) vAlpha *= 1.0 + coreBoost * 0.14;
+  if (uLayer > 0.5 && uLayer < 1.5) vAlpha *= 0.22 + uEnergy * 0.22;
+  if (uLayer > 1.5) {
+    float taper = smoothstep(0.0, 0.12, along) * (1.0 - smoothstep(0.76, 1.0, along));
+    vAlpha *= taper * (0.52 + uEnergy * 0.20);
+  }
+  if (uGlowPass > 0.5) vAlpha *= uLayer > 1.5 ? 0.13 : 0.09;
 
-  vHeat = clamp(0.28 + front * 0.42 + uEnergy * 0.24 + uBass * 0.14 + coreBoost * 0.18, 0.0, 1.0);
+  vHeat = clamp(0.30 + front * 0.42 + uEnergy * 0.22 + uBass * 0.12 + coreBoost * 0.16, 0.0, 1.0);
   vLayer = uLayer;
-  vSpark = smoothstep(0.82, 1.0, aSeed.z) * (0.42 + uHigh * 0.78);
+  vSpark = smoothstep(0.86, 1.0, aSeed.z) * (0.34 + uHigh * 0.68);
   vCoreBoost = coreBoost;
 }
 `;
@@ -211,26 +212,30 @@ in float vHeat;
 in float vLayer;
 in float vSpark;
 in float vCoreBoost;
+in float vAlong;
 out vec4 outColor;
 
 void main() {
   vec2 uv = gl_PointCoord - vec2(0.5);
   float d = length(uv) * 2.0;
-  float halo = 1.0 - smoothstep(0.06, 1.0, d);
-  float pointCore = 1.0 - smoothstep(0.0, 0.31, d);
+  float halo = 1.0 - smoothstep(0.07, 1.0, d);
+  float pointCore = 1.0 - smoothstep(0.0, 0.32, d);
   if (halo <= 0.002) discard;
 
-  vec3 deep = vec3(0.04, 0.35, 0.58);
-  vec3 cyan = vec3(0.12, 0.76, 0.98);
-  vec3 hotCyan = vec3(0.56, 0.96, 1.0);
+  vec3 deep = vec3(0.035, 0.30, 0.52);
+  vec3 cyan = vec3(0.10, 0.72, 0.96);
+  vec3 electric = vec3(0.40, 0.91, 1.0);
   vec3 color = mix(deep, cyan, vHeat);
-  float hotMix = clamp(pointCore * 0.26 + vSpark * 0.14 + vCoreBoost * 0.10, 0.0, 0.48);
-  color = mix(color, hotCyan, hotMix);
+  float electricMix = clamp(pointCore * 0.19 + vSpark * 0.12 + vCoreBoost * 0.08, 0.0, 0.35);
+  color = mix(color, electric, electricMix);
 
-  if (vLayer > 0.5 && vLayer < 1.5) color *= vec3(0.68, 0.92, 1.10);
-  if (vLayer > 1.5) color = mix(color, vec3(0.38, 0.92, 1.0), 0.46);
+  if (vLayer > 0.5 && vLayer < 1.5) color *= vec3(0.67, 0.92, 1.08);
+  if (vLayer > 1.5) {
+    float pulseColor = 0.30 + 0.20 * sin(vAlong * 14.0);
+    color = mix(color, vec3(0.30, 0.88, 1.0), pulseColor);
+  }
 
-  float alpha = halo * vAlpha * (0.46 + pointCore * 0.66 + vSpark * 0.12);
+  float alpha = halo * vAlpha * (0.48 + pointCore * 0.62 + vSpark * 0.10);
   outColor = vec4(color, alpha);
 }
 `;
@@ -282,6 +287,19 @@ function randomDirection() {
   return [Math.cos(theta) * r, z, Math.sin(theta) * r];
 }
 
+function normalize3(v) {
+  const length = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / length, v[1] / length, v[2] / length];
+}
+
+function cross3(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
 function buildCoreParticles(count) {
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count * 4);
@@ -290,17 +308,13 @@ function buildCoreParticles(count) {
     const dir = randomDirection();
     const group = Math.random();
     let radius;
-    if (group < 0.58) {
-      radius = 0.10 + Math.pow(Math.random(), 0.78) * 0.60;
-    } else if (group < 0.91) {
-      radius = 0.56 + Math.pow(Math.random(), 0.58) * 0.43;
-    } else {
-      radius = 0.90 + Math.random() * 0.25;
-    }
+    if (group < 0.57) radius = 0.10 + Math.pow(Math.random(), 0.80) * 0.58;
+    else if (group < 0.91) radius = 0.55 + Math.pow(Math.random(), 0.58) * 0.43;
+    else radius = 0.89 + Math.random() * 0.24;
 
-    positions[i * 3] = dir[0] * radius * (0.88 + Math.random() * 0.13);
-    positions[i * 3 + 1] = dir[1] * radius * (0.95 + Math.random() * 0.18);
-    positions[i * 3 + 2] = dir[2] * radius * (0.84 + Math.random() * 0.14);
+    positions[i * 3] = dir[0] * radius * (0.89 + Math.random() * 0.12);
+    positions[i * 3 + 1] = dir[1] * radius * (0.96 + Math.random() * 0.17);
+    positions[i * 3 + 2] = dir[2] * radius * (0.85 + Math.random() * 0.13);
 
     seeds[i * 4] = Math.random();
     seeds[i * 4 + 1] = Math.random();
@@ -316,15 +330,15 @@ function buildSwarmParticles(count) {
 
   for (let i = 0; i < count; i += 1) {
     const angle = Math.random() * Math.PI * 2;
-    const radius = 1.12 + Math.pow(Math.random(), 0.43) * 3.18;
-    const bandIndex = i % 5;
-    const bandOffset = (bandIndex - 2) * 0.16;
-    const spiral = Math.sin(angle * (1.7 + bandIndex * 0.23) + bandIndex) * 0.28;
-    const height = bandOffset + (Math.random() - 0.5) * (0.72 + bandIndex * 0.08);
+    const radius = 1.10 + Math.pow(Math.random(), 0.46) * 3.0;
+    const bandIndex = i % 6;
+    const bandOffset = (bandIndex - 2.5) * 0.12;
+    const spiral = Math.sin(angle * (1.45 + bandIndex * 0.17) + bandIndex * 0.7) * 0.22;
+    const height = bandOffset + (Math.random() - 0.5) * 0.58;
 
     positions[i * 3] = Math.cos(angle) * radius;
     positions[i * 3 + 1] = height + spiral;
-    positions[i * 3 + 2] = Math.sin(angle) * radius * (0.52 + Math.random() * 0.48);
+    positions[i * 3 + 2] = Math.sin(angle) * radius * (0.54 + Math.random() * 0.42);
 
     seeds[i * 4] = Math.random();
     seeds[i * 4 + 1] = Math.random();
@@ -334,32 +348,69 @@ function buildSwarmParticles(count) {
   return { positions, seeds };
 }
 
+function cubicBezier(a, b, c, d, t) {
+  const mt = 1 - t;
+  const mt2 = mt * mt;
+  const t2 = t * t;
+  return [
+    a[0] * mt2 * mt + 3 * b[0] * mt2 * t + 3 * c[0] * mt * t2 + d[0] * t2 * t,
+    a[1] * mt2 * mt + 3 * b[1] * mt2 * t + 3 * c[1] * mt * t2 + d[1] * t2 * t,
+    a[2] * mt2 * mt + 3 * b[2] * mt2 * t + 3 * c[2] * mt * t2 + d[2] * t2 * t,
+  ];
+}
+
 function buildFilamentParticles(count) {
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count * 4);
-  const filamentCount = 20;
+  const filamentCount = 24;
   const pointsPerFilament = Math.ceil(count / filamentCount);
 
+  const filaments = Array.from({ length: filamentCount }, (_, index) => {
+    const dir = normalize3(randomDirection());
+    const fallback = Math.abs(dir[1]) > 0.82 ? [1, 0, 0] : [0, 1, 0];
+    const side = normalize3(cross3(dir, fallback));
+    const side2 = normalize3(cross3(dir, side));
+    const startRadius = 0.48 + Math.random() * 0.20;
+    const reach = 1.30 + Math.random() * 0.95;
+    const bend = (Math.random() - 0.5) * 0.75;
+    const bend2 = (Math.random() - 0.5) * 0.48;
+    const start = dir.map((v) => v * startRadius);
+    const end = [
+      dir[0] * reach + side[0] * bend + side2[0] * bend2,
+      dir[1] * reach + side[1] * bend + side2[1] * bend2,
+      dir[2] * reach + side[2] * bend + side2[2] * bend2,
+    ];
+    const c1 = [
+      start[0] + dir[0] * 0.34 + side[0] * bend * 0.55,
+      start[1] + dir[1] * 0.34 + side[1] * bend * 0.55,
+      start[2] + dir[2] * 0.34 + side[2] * bend * 0.55,
+    ];
+    const c2 = [
+      end[0] - dir[0] * 0.42 + side2[0] * bend2 * 0.75,
+      end[1] - dir[1] * 0.42 + side2[1] * bend2 * 0.75,
+      end[2] - dir[2] * 0.42 + side2[2] * bend2 * 0.75,
+    ];
+    return { start, c1, c2, end, index };
+  });
+
   for (let i = 0; i < count; i += 1) {
-    const filament = Math.floor(i / pointsPerFilament);
+    const filamentIndex = Math.min(filamentCount - 1, Math.floor(i / pointsPerFilament));
     const localIndex = i % pointsPerFilament;
     const u = localIndex / Math.max(1, pointsPerFilament - 1);
-    const phase = (filament / filamentCount) * Math.PI * 2;
-    const twist = 1.25 + (filament % 4) * 0.34;
-    const radius = 0.52 + u * (1.02 + (filament % 3) * 0.17);
-    const angle = phase + u * twist;
-    const verticalBias = Math.sin(phase * 2.0) * 0.22;
-    const thickness = 0.018 + u * 0.010;
+    const filament = filaments[filamentIndex];
+    const p = cubicBezier(filament.start, filament.c1, filament.c2, filament.end, u);
+    const thickness = (0.010 + (1 - u) * 0.012) * (0.65 + Math.random() * 0.7);
 
-    positions[i * 3] = Math.cos(angle) * radius + (Math.random() - 0.5) * thickness;
-    positions[i * 3 + 1] = verticalBias + Math.sin(u * Math.PI * 2.0 + phase) * (0.12 + u * 0.10) + (Math.random() - 0.5) * thickness;
-    positions[i * 3 + 2] = Math.sin(angle) * radius * 0.72 + Math.cos(u * Math.PI * 1.7 + phase) * 0.11 + (Math.random() - 0.5) * thickness;
+    positions[i * 3] = p[0] + (Math.random() - 0.5) * thickness;
+    positions[i * 3 + 1] = p[1] + (Math.random() - 0.5) * thickness;
+    positions[i * 3 + 2] = p[2] + (Math.random() - 0.5) * thickness;
 
     seeds[i * 4] = u;
-    seeds[i * 4 + 1] = filament / filamentCount;
+    seeds[i * 4 + 1] = filamentIndex / filamentCount;
     seeds[i * 4 + 2] = Math.random();
     seeds[i * 4 + 3] = Math.random();
   }
+
   return { positions, seeds };
 }
 
@@ -469,10 +520,8 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
     const drawLayer = (gpu, count, layer) => {
       gl.uniform1f(uniforms.layer, layer);
       gl.bindVertexArray(gpu.vao);
-
       gl.uniform1f(uniforms.glowPass, 1.0);
       gl.drawArrays(gl.POINTS, 0, count);
-
       gl.uniform1f(uniforms.glowPass, 0.0);
       gl.drawArrays(gl.POINTS, 0, count);
     };
@@ -482,7 +531,7 @@ export default function JarvisCore({ visualStateRef, audioLevelRef, audioBandsRe
       const state = stateToCode(visualStateRef.current);
       const audio = audioLevelRef.current || 0;
       const bands = audioBandsRef.current || { bass: 0, mid: 0, high: 0 };
-      const baseEnergy = state === 0 ? 0.14 : state === 1 ? 0.42 : state === 2 ? 0.78 : state === 3 ? 0.96 : state === 4 ? 0.64 : 0.28;
+      const baseEnergy = state === 0 ? 0.16 : state === 1 ? 0.43 : state === 2 ? 0.78 : state === 3 ? 0.96 : state === 4 ? 0.64 : 0.28;
       const targetEnergy = Math.min(1.40, baseEnergy + audio * 0.64 + (bands.bass || 0) * 0.20);
       energy += (targetEnergy - energy) * 0.068;
       smoothX += (mouseX - smoothX) * 0.025;
