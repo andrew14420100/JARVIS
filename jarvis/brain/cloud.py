@@ -18,24 +18,32 @@ class CloudProvider:
     model: str
     extra_headers: dict[str, str]
     extra_body: dict[str, Any] | None = None
+    supports_dynamic_thinking: bool = False
 
 
 class CloudAIClient:
-    """OpenAI-compatible cloud client with free-only provider fallback.
+    """OpenAI-compatible cloud client restricted to explicitly free routes.
 
-    Provider order is deterministic. Z.AI is preferred when configured because
-    GLM-4.7-Flash is currently listed by Z.AI at $0 for input and output. Groq
-    and OpenRouter remain fallbacks. The router never substitutes a paid model.
+    Provider priority is deterministic:
+    NVIDIA Nemotron 3 Ultra -> Z.AI free GLM -> Groq Free -> OpenRouter Free.
+
+    JARVIS never substitutes a paid model. If every configured free provider is
+    unavailable or rate-limited, the request fails instead of becoming billable.
     """
 
+    NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
     ZAI_BASE_URL = "https://api.z.ai/api/paas/v4"
     GROQ_BASE_URL = "https://api.groq.com/openai/v1"
     OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+    NVIDIA_FREE_MODELS = {"nvidia/nemotron-3-ultra-550b-a55b"}
     ZAI_FREE_MODELS = {"glm-4.7-flash", "glm-4.5-flash"}
 
     def __init__(
         self,
         *,
+        nvidia_api_key: str = "",
+        nvidia_model: str = "nvidia/nemotron-3-ultra-550b-a55b",
         zai_api_key: str = "",
         zai_model: str = "glm-4.7-flash",
         groq_api_key: str = "",
@@ -52,6 +60,24 @@ class CloudAIClient:
         self.last_model = ""
         self.last_error = ""
 
+        if nvidia_api_key.strip():
+            selected_nvidia = nvidia_model.strip() or "nvidia/nemotron-3-ultra-550b-a55b"
+            if selected_nvidia not in self.NVIDIA_FREE_MODELS:
+                raise CloudAIError(
+                    "JARVIS_NVIDIA_MODEL deve essere un modello NVIDIA esplicitamente "
+                    f"ammesso come endpoint gratuito ({', '.join(sorted(self.NVIDIA_FREE_MODELS))})."
+                )
+            self.providers.append(
+                CloudProvider(
+                    name="nvidia-free",
+                    base_url=self.NVIDIA_BASE_URL,
+                    api_key=nvidia_api_key.strip(),
+                    model=selected_nvidia,
+                    extra_headers={},
+                    supports_dynamic_thinking=True,
+                )
+            )
+
         if zai_api_key.strip():
             selected_zai = zai_model.strip() or "glm-4.7-flash"
             if selected_zai not in self.ZAI_FREE_MODELS:
@@ -66,8 +92,6 @@ class CloudAIClient:
                     api_key=zai_api_key.strip(),
                     model=selected_zai,
                     extra_headers={},
-                    # Keep the conversational path fast. The agent can still
-                    # perform multi-step work through repeated tool calls.
                     extra_body={"thinking": {"type": "disabled"}},
                 )
             )
@@ -115,18 +139,13 @@ class CloudAIClient:
     def _configured_or_raise(self) -> list[CloudProvider]:
         if not self.providers:
             raise CloudAIError(
-                "Nessun provider cloud gratuito configurato. Imposta JARVIS_ZAI_API_KEY, "
-                "JARVIS_GROQ_API_KEY e/o JARVIS_OPENROUTER_API_KEY nel backend."
+                "Nessun provider cloud gratuito configurato. Imposta JARVIS_NVIDIA_API_KEY, "
+                "JARVIS_ZAI_API_KEY, JARVIS_GROQ_API_KEY e/o JARVIS_OPENROUTER_API_KEY."
             )
         return self.providers
 
     def list_models(self) -> list[str]:
-        """Return the configured free-only model ids.
-
-        Availability is verified by real chat calls. Some OpenAI-compatible
-        providers do not expose a uniform /models endpoint, so health reporting
-        must not mark JARVIS offline merely because model discovery differs.
-        """
+        """Return only the configured free-only model ids."""
         return [provider.model for provider in self._configured_or_raise()]
 
     def resolve_model(self, configured_model: str = "") -> str:
@@ -140,6 +159,12 @@ class CloudAIClient:
             return configured_model.strip()
         return providers[0].model
 
+    @staticmethod
+    def _is_agentic_request(tools: list[dict[str, Any]] | None) -> bool:
+        # Normal greetings and conversational turns should be immediate. Requests
+        # that expose tools are allowed to use Nemotron's deeper thinking mode.
+        return bool(tools)
+
     def chat_completion(
         self,
         *,
@@ -148,7 +173,7 @@ class CloudAIClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]:
-        del model  # each provider is pinned to its own verified free model id.
+        del model  # each provider is pinned to its own free-only model id.
         errors: list[str] = []
 
         for provider in self._configured_or_raise():
@@ -159,6 +184,10 @@ class CloudAIClient:
             }
             if provider.extra_body:
                 payload.update(provider.extra_body)
+            if provider.supports_dynamic_thinking:
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": self._is_agentic_request(tools)
+                }
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
