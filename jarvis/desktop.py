@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import threading
 import time
 import webbrowser
@@ -14,65 +13,36 @@ from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
-_WAKE_ALIASES = (
-    r"(?:(?:hey|ehi)\s*[,.:;!?\-]*\s*)?"
-    r"(?:jarvis|jervis|gervis|giarvis|jarviss|giannis|giardini|giardinis|gia\s+e\s+bis|già\s+e\s+bis)"
-)
+def _post_wake_speech_profile(audio, *, sample_rate: int = 16000) -> tuple[bool, float, float, float]:
+    """Decide whether real speech continued after the wake word.
 
-
-def _strip_wake_phrase(text: str) -> str:
-    value = " ".join(text.strip().split())
-    value = re.sub(
-        rf"^\s*{_WAKE_ALIASES}\b[,.!?;:\-]*\s*",
-        "",
-        value,
-        count=1,
-        flags=re.I,
-    ).strip()
-    if re.fullmatch(r"(?:hey|ehi)[\s,.!?;:\-]*", value, flags=re.I):
-        return ""
-
-    # The wake detector has already confirmed that this utterance began with
-    # Jarvis. Whisper can still invent arbitrary proper names for the wake word
-    # (for example "Hey, Giorgio, Miss"). If an activation starts with Hey/Ehi,
-    # treat the next one/two short tokens as a likely wake-name transcription.
-    # Preserve everything after them so one-shot commands still work.
-    match = re.match(r"^\s*(?:hey|ehi)\b[\s,.!?;:\-]*(.*)$", value, flags=re.I)
-    if match:
-        remainder = match.group(1).strip(" ,.!?;:-")
-        words = remainder.split()
-        if len(words) <= 2:
-            return ""
-        wake_fragments = {"miss", "vis", "bis", "mister", "mis"}
-        drop = 2 if len(words) >= 4 and words[1].casefold().strip(".,!?;:-") in wake_fragments else 1
-        return " ".join(words[drop:]).strip(" ,.!?;:-")
-    return value
-
-
-def _tail_peak_rms(audio, *, sample_rate: int = 16000, seconds: float = 0.45) -> float:
-    """Return the loudest short-frame RMS in the activation tail.
-
-    The callback fires as soon as openWakeWord detects Jarvis. Keeping the wake
-    stream alive briefly lets us tell the difference between an isolated wake
-    word and a continuous command such as "Jarvis, come stai?" without sending
-    every wake phrase through Whisper.
+    The decision is based only on audio captured *after* openWakeWord fired.
+    A dynamic floor derived from the local noise level replaces the old fixed
+    threshold that could mistake a 0.0007 room-noise tail for speech.
     """
     import numpy as np
 
     array = np.asarray(audio, dtype=np.float32).reshape(-1)
     if not array.size:
-        return 0.0
-    tail_samples = max(1, int(sample_rate * max(0.1, seconds)))
-    tail = array[-tail_samples:]
-    frame = max(160, int(sample_rate * 0.08))
-    peak = 0.0
-    for start in range(0, tail.size, frame):
-        chunk = tail[start : start + frame]
-        if not chunk.size:
+        return False, 0.0, 0.0, 0.0012
+
+    frame = max(320, int(sample_rate * 0.06))
+    frame_rms: list[float] = []
+    for start in range(0, array.size, frame):
+        chunk = array[start : start + frame]
+        if chunk.size < frame // 2:
             continue
-        rms = float(np.sqrt(np.mean(np.square(chunk))))
-        peak = max(peak, rms)
-    return peak
+        frame_rms.append(float(np.sqrt(np.mean(np.square(chunk)))))
+
+    if not frame_rms:
+        return False, 0.0, 0.0, 0.0012
+
+    peak = max(frame_rms)
+    noise = float(np.percentile(np.asarray(frame_rms, dtype=np.float32), 30))
+    threshold = max(0.0012, noise * 2.5)
+    voiced_frames = sum(1 for value in frame_rms if value >= threshold)
+    heard_speech = voiced_frames >= 2 and peak >= threshold
+    return heard_speech, peak, noise, threshold
 
 
 def main() -> None:
@@ -151,7 +121,7 @@ def main() -> None:
         initial_silence_seconds: float,
         max_seconds: float,
         activation_audio=None,
-        strip_wake: bool = False,
+        activation_has_speech: bool = False,
     ) -> str:
         import numpy as np
 
@@ -163,24 +133,43 @@ def main() -> None:
         )
         capture_seconds = time.monotonic() - capture_started
 
-        combined = audio
-        if activation_audio is not None and getattr(activation_audio, "size", 0):
-            combined = np.concatenate(
-                (activation_audio.astype(np.float32, copy=False), audio.astype(np.float32, copy=False))
+        # If neither the live STT stream nor the post-wake buffer contains real
+        # speech, do not invoke Whisper at all. Decoding silence is what allowed
+        # hallucinated phrases to reach the brain in earlier builds.
+        if not stt.last_recording_heard_speech and not activation_has_speech:
+            print(
+                f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
+                f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
+                f"speech=no gain=1.0x · capture={capture_seconds:.2f}s · "
+                "decode=saltata (nessuna voce)"
             )
+            return ""
 
+        pieces = []
+        if activation_audio is not None and getattr(activation_audio, "size", 0):
+            pieces.append(activation_audio.astype(np.float32, copy=False))
+        if getattr(audio, "size", 0):
+            pieces.append(audio.astype(np.float32, copy=False))
+        if not pieces:
+            print(
+                f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
+                f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
+                f"speech=no gain=1.0x · capture={capture_seconds:.2f}s · "
+                "decode=saltata (audio vuoto)"
+            )
+            return ""
+
+        combined = pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
         stt_started = time.monotonic()
         result = stt.transcribe(combined)
         stt_seconds = time.monotonic() - stt_started
         text = result.text.strip()
-        if strip_wake:
-            text = _strip_wake_phrase(text)
+        speech_label = "si" if stt.last_recording_heard_speech else "post-wake"
 
         print(
             f"[STT] max_rms={stt.last_recording_max_rms:.4f} "
             f"soglia_voce={stt.last_recording_speech_threshold:.4f} "
-            f"speech={'si' if stt.last_recording_heard_speech else 'no'} "
-            f"gain={stt.last_recording_gain:.1f}x · "
+            f"speech={speech_label} gain={stt.last_recording_gain:.1f}x · "
             f"capture={capture_seconds:.2f}s · decode={stt_seconds:.2f}s"
         )
         return text
@@ -220,19 +209,18 @@ def main() -> None:
             return
         busy.set()
 
-        # Keep capturing a short post-roll before taking ownership away from the
-        # wake listener. If speech continues, this is a one-shot command. If the
-        # tail is quiet, skip Whisper entirely and acknowledge immediately.
-        time.sleep(0.45)
+        # openWakeWord owns the microphone a little longer after the trigger.
+        # It records only the chunks AFTER the activating chunk into a dedicated
+        # post-wake buffer. Whisper will never receive the wake phrase itself.
+        time.sleep(0.62)
 
-        activation_audio = None
-        activation_tail_rms = 0.0
+        post_wake_audio = None
         try:
-            activation_audio = wake.recent_audio(1.8, exclude_tail_seconds=0.0)
-            activation_tail_rms = _tail_peak_rms(activation_audio)
+            post_wake_audio = wake.post_wake_audio(seconds=0.75, exclude_head_seconds=0.18)
         except Exception:
-            activation_audio = None
-            activation_tail_rms = 0.0
+            post_wake_audio = None
+
+        continued, post_peak, post_noise, post_threshold = _post_wake_speech_profile(post_wake_audio)
 
         if wake.selected_device is not None:
             stt.input_device = wake.selected_device
@@ -240,19 +228,22 @@ def main() -> None:
         wake.pause()
         try:
             print("[JARVIS] Ti ascolto...")
-            continuation_threshold = 0.00055
-            if activation_tail_rms >= continuation_threshold:
-                print(f"[JARVIS] Comando continuo rilevato · tail_rms={activation_tail_rms:.4f}")
+            if continued:
+                print(
+                    "[JARVIS] Comando dopo wake rilevato · "
+                    f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f}"
+                )
                 text = capture_turn(
-                    initial_silence_seconds=1.1,
+                    initial_silence_seconds=0.9,
                     max_seconds=min(settings.listener_max_utterance_seconds, 15.0),
-                    activation_audio=activation_audio,
-                    strip_wake=True,
+                    activation_audio=post_wake_audio,
+                    activation_has_speech=True,
                 )
             else:
                 print(
-                    f"[JARVIS] Wake isolata · tail_rms={activation_tail_rms:.4f} · "
-                    "salto decodifica wake"
+                    "[JARVIS] Wake isolata · "
+                    f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f} · "
+                    "wake non inviata a Whisper"
                 )
                 text = ""
 
