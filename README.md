@@ -9,78 +9,99 @@ JARVIS è un assistente locale per Windows progettato per usare modelli caricati
 - Rilevamento automatico del primo modello caricato tramite `/v1/models`.
 - Agent loop con tool calling reale.
 - Stati interni: `IDLE`, `THINKING`, `EXECUTING`, `SPEAKING`, `ERROR`.
-- Tool reali:
-  - `get_cpu_usage`
-  - `get_ram_usage`
-  - `get_system_information`
-  - `open_application` (Windows)
+- Tool reali: CPU, RAM, informazioni sistema e apertura applicazioni Windows.
+- Memoria locale SQLite con recupero contestuale.
+- La memoria automatica evita intenzionalmente password, PIN, carte, API key e altri dati sensibili evidenti.
 - API FastAPI e CLI testuale.
 - Nessuna API AI a pagamento obbligatoria.
 
 ### JARVIS Particle UI
-La precedente sfera CSS è stata sostituita da un renderer particellare realtime costruito direttamente nel frontend:
+Il frontend React usa un renderer **WebGL2** con circa 28.000 particelle:
 
-- core organico formato da migliaia di particelle;
-- campo di particelle esterne in orbita;
-- deformazione continua e respirazione del core;
-- HUD fullscreen;
-- boot sequence;
-- animazioni differenti per `IDLE`, `LISTENING`, `THINKING`, `EXECUTING`, `SPEAKING` ed `ERROR`;
-- reazione in tempo reale all'audio del microfono tramite Web Audio API + FFT;
-- basse/medie frequenze usate per aumentare energia e deformazione del core;
-- interfaccia indipendente dalla velocità del modello: il renderer continua a funzionare mentre LM Studio elabora una richiesta;
-- indicatore FPS, livello audio, stato connessione e modello attivo.
+- core organico;
+- sciame esterno;
+- filamenti aperti;
+- deformazione continua e respirazione;
+- HUD fullscreen e boot sequence;
+- stati `IDLE`, `LISTENING`, `THINKING`, `EXECUTING`, `SPEAKING`, `ERROR`;
+- analisi FFT del microfono nel browser;
+- reazione distinta a bassi, medi e alti;
+- rendering indipendente dalla velocità del modello AI.
 
-> La modalità microfono attuale pilota il visualizzatore audio. Trascrizione locale, wake word e TTS verranno collegati nei passaggi successivi.
+### Voice Core locale
+È stata aggiunta una prima integrazione ispirata alle migliori idee di `PanPenek/JarvisAi`, ma adattata all'architettura di questo progetto:
 
-## Requisiti
+- **Wake word** locale con `openWakeWord` (`hey_jarvis`);
+- **Speech-to-text** locale con `faster-whisper`;
+- lingua STT predefinita: italiano;
+- fallback automatico Whisper da CUDA a CPU;
+- registrazione fino al silenzio;
+- **Kokoro TTS** locale, caricato solo quando serve;
+- runtime desktop unico in `jarvis/desktop.py`;
+- dipendenze voce separate in `requirements-local.txt`, quindi Emergent non deve installarle.
 
-- Windows 11 consigliato.
-- Python 3.11+.
-- LM Studio.
-- Un modello compatibile con chat/tool calling caricato in LM Studio.
-- Browser moderno con supporto Canvas e Web Audio API.
+> Emergent serve per sviluppare e vedere la UI. Wake word, microfono di sistema, controllo desktop, LM Studio e TTS devono girare sul PC Windows locale.
 
-## Avvio su Windows
+## Installazione preview / Emergent
+
+Per la preview web basta:
+
+```bash
+pip install -r requirements.txt
+```
+
+Il frontend rimane in `/frontend`, il backend Emergent in `/backend`, mentre il core Python principale è nel package `/jarvis`.
+
+## Installazione completa su Windows
+
+Apri PowerShell nella cartella del progetto:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements-local.txt
+```
+
+Poi:
 
 1. Apri LM Studio.
 2. Carica un modello.
-3. Avvia il server locale LM Studio sulla porta `1234`.
-4. In PowerShell, dalla cartella del progetto:
+3. Avvia il server locale sulla porta `1234`.
+4. Copia `.env.example` in `.env`.
+5. Abilita il runtime voce:
 
-```powershell
-.\run.ps1
+```env
+JARVIS_VOICE_ENABLED=true
 ```
 
-5. Apri:
+Avvia il Jarvis desktop completo:
+
+```powershell
+python -m jarvis.desktop
+```
+
+Il runtime apre automaticamente:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Al primo utilizzo del pulsante microfono il browser chiederà il permesso di usare il microfono.
+e resta in ascolto della wake word configurata.
 
-Per la CLI:
+## Avvio solo web/API
 
 ```powershell
-.\run-cli.ps1
+.\run.ps1
 ```
 
-## Test rapido
+oppure:
 
-Puoi provare:
+```powershell
+uvicorn jarvis.app:app --host 127.0.0.1 --port 8000 --reload
+```
 
-- `Jarvis, quanta RAM sto usando?`
-- `Jarvis, qual è l'utilizzo della CPU?`
-- `Jarvis, apri Blocco Note.`
-
-CPU e RAM vengono lette realmente dal computer e `open_application` esegue l'azione su Windows.
-
-Per provare il renderer vocale, premi il pulsante del microfono e parla: il core e il campo particellare reagiscono direttamente all'energia della tua voce, senza aspettare il modello AI.
-
-## Configurazione
-
-Copia `.env.example` in `.env` se vuoi cambiare endpoint/modello:
+## Configurazione principale
 
 ```env
 JARVIS_LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
@@ -88,61 +109,110 @@ JARVIS_MODEL=
 JARVIS_MAX_AGENT_ITERATIONS=8
 JARVIS_REQUEST_TIMEOUT_SECONDS=120
 JARVIS_USER_NAME=Signore
+
+JARVIS_MEMORY_ENABLED=true
+JARVIS_MEMORY_DB_PATH=data/jarvis_memory.sqlite3
+JARVIS_MEMORY_TOP_K=4
+
+JARVIS_VOICE_ENABLED=true
+JARVIS_WAKE_MODEL=hey_jarvis
+JARVIS_WAKE_THRESHOLD=0.50
+
+JARVIS_STT_MODEL=small
+JARVIS_STT_DEVICE=auto
+JARVIS_STT_COMPUTE_TYPE=int8
+JARVIS_STT_LANGUAGE=it
+
+JARVIS_TTS_ENABLED=true
+JARVIS_TTS_VOICE=af_heart
+JARVIS_TTS_SPEED=1.05
+JARVIS_TTS_LANG_CODE=a
 ```
 
 Lasciando `JARVIS_MODEL` vuoto, JARVIS usa automaticamente il primo modello restituito da LM Studio.
 
-## Architettura prevista
+## API utili
 
 ```text
-Microfono / testo
-       |
-       v
- JARVIS CORE
-       |
-       +---- comandi locali immediati
-       |
-       +---- AI Router
-                |
-                +---- modello rapido
-                +---- modello intermedio
-                +---- modello potente
-       |
-       +---- Tools Windows / Browser / Git / VS Code
-       |
-       v
- Particle UI + TTS
+GET    /api/health
+GET    /api/capabilities
+GET    /api/models
+POST   /api/chat
+POST   /api/reset
+GET    /api/memory
+DELETE /api/memory/{id}
 ```
 
-L'obiettivo è evitare di usare un modello grande per ogni comando. Jarvis dovrà scegliere automaticamente il motore più adatto e fare escalation soltanto quando necessario.
+`/api/capabilities` mostra se Whisper, Kokoro e openWakeWord sono realmente installati sul computer.
+
+## Architettura
+
+```text
+                   TU
+                   |
+          +--------+---------+
+          |                  |
+      testo/UI          "Hey Jarvis"
+                             |
+                       openWakeWord
+                             |
+                      faster-whisper
+          |                  |
+          +---------+--------+
+                    v
+              JARVIS CORE
+                    |
+              Local Memory
+                    |
+             Agent + Tools
+                    |
+                LM Studio
+                    |
+                  TTS
+                    |
+                 Kokoro
+                    |
+              Particle UI
+```
+
+## Memoria locale
+
+La memoria è salvata in SQLite sul computer. Jarvis richiama solo fatti pertinenti alla richiesta corrente. La memorizzazione automatica avviene per frasi esplicite come `Ricorda che...`, `Preferisco...` o indicazioni sul progetto, e blocca diversi pattern sensibili evidenti.
+
+Puoi vedere i ricordi con:
+
+```text
+GET /api/memory
+```
+
+e cancellarne uno con:
+
+```text
+DELETE /api/memory/ID
+```
 
 ## Prossimi passaggi
 
-### Voice Core
-- wake word `Jarvis`;
-- VAD locale;
-- faster-whisper locale;
-- TTS locale;
-- animazione `SPEAKING` sincronizzata con l'audio prodotto da Jarvis;
-- barge-in: possibilità di interrompere Jarvis mentre parla.
-
 ### Multi-model router
-- supporto a più modelli LM Studio;
-- modello rapido, intermedio e potente;
-- scelta automatica in base a complessità, strumenti richiesti, coding, vision e numero di passaggi;
-- escalation automatica se il primo modello non riesce a completare la richiesta.
+- modello rapido;
+- modello intermedio;
+- modello potente;
+- classificazione automatica della richiesta;
+- escalation automatica se il primo modello fallisce;
+- caricamento/scaricamento intelligente per non saturare VRAM e RAM.
 
 ### Desktop / Agent
-- memoria SQLite;
-- visione dello schermo;
+- screen vision;
+- mouse e tastiera controllati tramite policy;
 - browser agent;
 - Git / GitHub / VS Code;
+- volume e media control;
 - skill e routine;
-- applicazione desktop Windows;
-- avvio automatico.
+- barge-in: interrompere Jarvis mentre parla;
+- sincronizzazione dell'audio TTS con il core WebGL.
 
 ## Sicurezza
 
 LM Studio deve restare privato su `localhost`. Se JARVIS verrà esposto fuori dal PC, verrà pubblicato soltanto un gateway autenticato e mai direttamente la porta `1234`.
 
-Le azioni distruttive future devono passare da policy nel codice (`SAFE`, `CONFIRMATION_REQUIRED`, `BLOCKED`) e non essere affidate esclusivamente al modello.
+Le azioni distruttive devono passare dalle policy nel codice (`SAFE`, `CONFIRMATION_REQUIRED`, `BLOCKED`) e non essere affidate esclusivamente al modello.
