@@ -76,13 +76,19 @@ class LocalSTT:
         return self._model
 
     def _transcribe_once(self, model, audio):
-        """Run one Whisper pass and eagerly consume the lazy segment generator."""
+        """Run one Whisper pass and eagerly consume the lazy segment generator.
+
+        Keep the prompt deliberately neutral. Biasing Whisper with the wake-word
+        sentence caused quiet captures to hallucinate that exact sentence instead
+        of transcribing what the user actually said.
+        """
         segments, info = model.transcribe(
             audio,
             beam_size=3,
             language=self.language or None,
             vad_filter=True,
-            initial_prompt="Conversazione in italiano con un assistente chiamato Jarvis. La parola di attivazione è Jarvis o Hey Jarvis.",
+            condition_on_previous_text=False,
+            initial_prompt="Conversazione naturale in italiano.",
         )
         segments = list(segments)
         text = " ".join(segment.text.strip() for segment in segments).strip()
