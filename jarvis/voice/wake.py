@@ -95,13 +95,7 @@ class WakeWordListener:
         return audio
 
     def _prediction_score(self, predictions: dict[str, Any]) -> tuple[str, float]:
-        """Resolve openWakeWord's versioned prediction key safely.
-
-        The public model is configured as ``hey_jarvis`` but current releases
-        commonly expose predictions under a key such as ``hey_jarvis_v0.1``.
-        Looking up only the unversioned configuration name therefore returns
-        zero forever even while the model is hearing the wake phrase.
-        """
+        """Resolve openWakeWord's versioned prediction key safely."""
         if not predictions:
             return self.model_name, 0.0
 
@@ -116,8 +110,6 @@ class WakeWordListener:
                     continue
 
         if not matches:
-            # If only one wake model is loaded, using its sole prediction is
-            # safer than silently reading 0.0 from a mismatched versioned key.
             if len(predictions) == 1:
                 key, value = next(iter(predictions.items()))
                 try:
@@ -144,6 +136,15 @@ class WakeWordListener:
         callback_lock = threading.Lock()
         prediction_key_reported = False
         last_candidate_log = 0.0
+
+        # The public hey_jarvis model is much more confident on "Hey Jarvis"
+        # than on the shorter "Jarvis" invocation. Keep the normal threshold as
+        # the high-confidence path, but allow a lower score only when the same
+        # audio frame contains clear speech energy. This makes "Jarvis" usable
+        # without globally dropping the detector threshold and inviting constant
+        # false activations from room noise.
+        soft_threshold = max(0.12, min(0.18, self.threshold * 0.45))
+        speech_rms_gate = 0.008
 
         try:
             default_input = sd.query_devices(kind="input")
@@ -176,31 +177,36 @@ class WakeWordListener:
 
                 predictions = model.predict(pcm)
                 prediction_key, score = self._prediction_score(predictions)
+                pcm_float = pcm.astype(np.float32) / 32768.0
+                rms = float(np.sqrt(np.mean(np.square(pcm_float)))) if pcm_float.size else 0.0
 
                 if not prediction_key_reported:
                     print(
                         f"[JARVIS] Wake detector: {prediction_key} · "
-                        f"soglia {self.threshold:.2f}"
+                        f"soglia {self.threshold:.2f} · soft {soft_threshold:.3f} con voce"
                     )
                     prediction_key_reported = True
 
-                # A lightweight diagnostic only for meaningful candidates. It
-                # confirms that the microphone/model are hearing the user without
-                # flooding the console with every 80 ms frame.
                 now = time.monotonic()
-                diagnostic_floor = min(0.20, max(0.08, self.threshold * 0.35))
+                diagnostic_floor = min(0.20, max(0.08, soft_threshold * 0.75))
                 if score >= diagnostic_floor and now - last_candidate_log >= 0.6:
-                    print(f"[WAKE] {prediction_key} score={score:.3f}")
+                    print(f"[WAKE] {prediction_key} score={score:.3f} rms={rms:.4f}")
                     last_candidate_log = now
 
-                if score < self.threshold:
+                hard_match = score >= self.threshold
+                soft_match = score >= soft_threshold and rms >= speech_rms_gate
+                if not (hard_match or soft_match):
                     continue
 
                 model.reset()
                 if now < cooldown_until:
                     continue
 
-                print(f"[JARVIS] Wake word rilevata · {prediction_key} score={score:.3f}")
+                mode = "hard" if hard_match else "soft"
+                print(
+                    f"[JARVIS] Wake word rilevata · {prediction_key} "
+                    f"score={score:.3f} rms={rms:.4f} mode={mode}"
+                )
 
                 if busy and busy():
                     cooldown_until = now + 2.0
