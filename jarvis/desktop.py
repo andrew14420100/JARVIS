@@ -62,15 +62,22 @@ def main() -> None:
         max_chars=settings.presence_max_chars,
     )
 
+    # STT and wake word are required for the desktop voice loop. TTS is allowed
+    # to be pending so development can continue before the private voice sample
+    # is supplied; JARVIS will simply remain silent until CosyVoice is ready.
     missing: list[str] = []
-    for name, service in (("STT", stt), ("TTS", tts), ("Wake word", wake)):
+    for name, service in (("STT", stt), ("Wake word", wake)):
         if not service.available():
             missing.append(f"{name}: {service.dependency_status()}")
     if missing:
         details = "\n".join(f"  - {item}" for item in missing)
-        raise SystemExit(
-            "Mancano componenti del runtime locale. Se TTS indica cosyvoice_service=false, "
-            "avvia prima start-cosyvoice.ps1 dopo aver configurato la voce.\n" + details
+        raise SystemExit("Mancano componenti del runtime locale:\n" + details)
+
+    tts_ready = bool(tts.available())
+    if not tts_ready:
+        print(
+            "[JARVIS] Voce non ancora pronta. Il runtime continua senza TTS; "
+            "aggiungi il campione e avvia start-cosyvoice.ps1 quando disponibile."
         )
 
     busy = threading.Event()
@@ -78,7 +85,8 @@ def main() -> None:
 
     def interrupt() -> None:
         stt.abort()
-        tts.stop()
+        if tts_ready:
+            tts.stop()
         agent.set_state(JarvisState.IDLE)
         busy.clear()
 
@@ -100,7 +108,7 @@ def main() -> None:
         wake.pause()
         try:
             agent.set_state(JarvisState.LISTENING)
-            if settings.tts_enabled:
+            if settings.tts_enabled and tts_ready:
                 try:
                     tts.speak("Sì?", streamed=True)
                 except Exception as exc:
@@ -146,7 +154,7 @@ def main() -> None:
                     f"score={reasoning.get('score')}"
                 )
 
-            if settings.tts_enabled and reply:
+            if settings.tts_enabled and tts_ready and reply:
                 try:
                     agent.set_state(JarvisState.SPEAKING)
                     # CosyVoice streams PCM chunks as soon as they are generated,
@@ -175,7 +183,7 @@ def main() -> None:
 
     print("[JARVIS] Desktop runtime online.")
     print(f"[JARVIS] Wake word: {settings.wake_model}")
-    print(f"[JARVIS] Voice: {voice_name}")
+    print(f"[JARVIS] Voice: {voice_name} · {'READY' if tts_ready else 'PENDING SAMPLE'}")
     print(f"[JARVIS] Presence context: {settings.presence_context_seconds:.0f}s (RAM only)")
     print("[JARVIS] Hybrid cognitive engine: OpenJarvis + guarded local agent")
     print("[JARVIS] UI: http://127.0.0.1:8000")
