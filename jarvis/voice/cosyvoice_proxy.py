@@ -24,11 +24,11 @@ class CosyVoiceAudio:
 
 
 class CosyVoiceProxyTTS:
-    """Client for the warm CosyVoice 3 service running beside JARVIS.
+    """Low-latency client for the local CosyVoice 3 service.
 
-    It can consume either a complete reply or live text chunks from the brain.
-    Text is converted into natural phrases while it is still arriving, and
-    CosyVoice synthesizes the next phrase while the current audio is playing.
+    Complete replies use the ordinary streaming endpoint. Live LLM replies use
+    one native CosyVoice bistream session so acoustic state and prosody remain
+    continuous while new text arrives.
     """
 
     def __init__(
@@ -41,6 +41,7 @@ class CosyVoiceProxyTTS:
         self._interrupt = threading.Event()
         self._speaking = threading.Event()
         self._active_response: httpx.Response | None = None
+        self._active_bistream_session: str | None = None
         self._sample_rate = 24000
 
     def _health(self) -> dict[str, object]:
@@ -57,8 +58,7 @@ class CosyVoiceProxyTTS:
 
     def available(self) -> bool:
         try:
-            data = self._health()
-            return bool(data.get("ok"))
+            return bool(self._health().get("ok"))
         except Exception:
             return False
 
@@ -94,8 +94,8 @@ class CosyVoiceProxyTTS:
             "requires_gpu": True,
             "cloned_voice": True,
             "streaming": True,
-            "buffered_playback": True,
             "live_text_streaming": True,
+            "native_bistream": False,
             "service_url": self.base_url,
             "sample_rate": self._sample_rate,
         }
@@ -105,23 +105,30 @@ class CosyVoiceProxyTTS:
                 "provider": health.get("provider") or "cosyvoice3-local",
                 "ready": bool(health.get("ok")),
                 "sample_rate": int(health.get("sample_rate") or self._sample_rate),
-                "model": health.get("model") or "Fun-CosyVoice3-0.5B-2512",
+                "model": health.get("model") or "Fun-CosyVoice3-0.5B",
                 "device": health.get("device") or "unknown",
                 "precision": health.get("precision") or "unknown",
+                "native_bistream": bool(health.get("bistream")),
                 "reference_voice_configured": bool(health.get("reference_voice_configured")),
                 "speaker_cached": bool(health.get("speaker_cached")),
                 "model_warm": bool(health.get("model_warm")),
             })
         except Exception:
             data["ready"] = False
-            data["reference_voice_configured"] = False
-            data["speaker_cached"] = False
-            data["model_warm"] = False
             data["device"] = "unavailable"
         return data
 
     def stop(self) -> None:
         self._interrupt.set()
+        session_id = self._active_bistream_session
+        if session_id:
+            try:
+                httpx.post(
+                    f"{self.base_url}/tts/bistream/{session_id}/finish",
+                    timeout=1.0,
+                )
+            except Exception:
+                pass
         response = self._active_response
         if response is not None:
             try:
@@ -151,82 +158,49 @@ class CosyVoiceProxyTTS:
         clean = re.sub(r"<[^>]+>", "", clean)
         return " ".join(clean.strip().split())
 
-    @staticmethod
-    def _speech_segments(text: str) -> list[str]:
-        clean = " ".join(str(text or "").strip().split())
-        if not clean:
-            return []
-
-        rough = [part.strip() for part in re.split(r"(?<=[.!?;:,])\s+", clean) if part.strip()]
-        if not rough:
-            rough = [clean]
-
-        segments: list[str] = []
-        for part in rough:
-            limit = 46 if not segments else 82
-            while len(part) > limit:
-                cut = part.rfind(" ", 0, limit + 1)
-                if cut < max(18, limit // 2):
-                    cut = limit
-                piece = part[:cut].strip(" ,")
-                if piece:
-                    segments.append(piece)
-                part = part[cut:].strip(" ,")
-                limit = 82
-            if part:
-                segments.append(part)
-
-        merged: list[str] = []
-        for segment in segments:
-            if merged and len(segment) < 12 and len(merged[-1]) + len(segment) + 1 <= 82:
-                merged[-1] = f"{merged[-1]} {segment}".strip()
-            else:
-                merged.append(segment)
-        return merged
-
     @classmethod
     def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
+        """Create modest text packets without restarting TTS acoustic state."""
         buffer = ""
-        first_segment = True
+        first_packet = True
+
         for raw in chunks:
             if raw is None:
                 continue
             buffer += str(raw)
 
             while buffer:
+                # Never release an unfinished internal markup block to speech.
                 lowered = buffer.lower()
-                tool_open = None
-                tool_close = None
+                unfinished_markup = False
                 for opening, closing in (
                     ("<invoke", "</invoke>"),
                     ("<tool_call", "</tool_call>"),
                     ("<parameter", "</parameter>"),
                 ):
                     pos = lowered.find(opening)
-                    if pos >= 0 and (tool_open is None or pos < tool_open):
-                        tool_open = pos
-                        tool_close = lowered.find(closing, pos)
-                if tool_open is not None and tool_close is None:
+                    if pos >= 0 and lowered.find(closing, pos) < 0:
+                        unfinished_markup = True
+                        break
+                if unfinished_markup:
                     break
 
-                limit = 46 if first_segment else 82
+                # A short first packet minimizes time-to-first-speech. Later
+                # packets are larger because native bistream preserves prosody.
+                target = 34 if first_packet else 64
+                max_len = 52 if first_packet else 96
                 boundary: int | None = None
 
-                strong = re.search(r"[.!?](?:\s+|$)", buffer)
-                if strong:
-                    boundary = strong.end()
-                else:
-                    soft = re.search(r"[;:,]\s+", buffer)
-                    if soft and soft.end() >= 18:
-                        boundary = soft.end()
+                punctuation = list(re.finditer(r"[.!?;:,](?:\s+|$)", buffer))
+                for match in punctuation:
+                    if match.end() >= target:
+                        boundary = match.end()
+                        break
 
-                if boundary is None and len(buffer) > limit:
-                    cut = buffer.rfind(" ", 0, limit + 1)
-                    if cut < max(18, limit // 2):
-                        if len(buffer) < limit + 18:
-                            break
-                        cut = limit
-                    boundary = cut
+                if boundary is None and len(buffer) >= max_len:
+                    cut = buffer.rfind(" ", 0, max_len + 1)
+                    if cut >= max(18, target // 2):
+                        boundary = cut
 
                 if boundary is None:
                     break
@@ -235,7 +209,7 @@ class CosyVoiceProxyTTS:
                 buffer = buffer[boundary:].lstrip()
                 clean = cls._clean_for_speech(piece)
                 if clean:
-                    first_segment = False
+                    first_packet = False
                     yield clean
 
         clean = cls._clean_for_speech(buffer)
@@ -285,83 +259,16 @@ class CosyVoiceProxyTTS:
             wav_file.writeframes(pcm)
         return CosyVoiceAudio(buffer.getvalue())
 
-    def _play_segments(self, segments: Iterator[str], *, live: bool) -> None:
+    def _play_pcm_iterator(self, pcm_chunks: Iterator[bytes], *, label: str) -> None:
         import sounddevice as sd
 
-        self._interrupt.clear()
-        self._speaking.set()
         stream = None
-        producer: threading.Thread | None = None
-        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=32)
-        segment_counter = [0]
-
-        def queue_item(item: bytes | Exception | None) -> bool:
-            while not self._interrupt.is_set():
-                try:
-                    audio_queue.put(item, timeout=0.05)
-                    return True
-                except queue.Full:
-                    continue
-            return False
-
-        def produce_audio() -> None:
-            carry = b""
-            try:
-                for segment in segments:
-                    if self._interrupt.is_set():
-                        break
-                    clean = self._clean_for_speech(segment)
-                    if not clean:
-                        continue
-                    segment_counter[0] += 1
-                    for chunk in self.stream_pcm(clean):
-                        if self._interrupt.is_set():
-                            break
-                        data = carry + chunk
-                        carry = b""
-                        if len(data) % 2:
-                            carry = data[-1:]
-                            data = data[:-1]
-                        if data and not queue_item(data):
-                            return
-            except Exception as exc:
-                queue_item(exc)
-            finally:
-                queue_item(None)
+        carry = b""
+        started = time.monotonic()
+        first_audio = None
+        total_bytes = 0
 
         try:
-            self._health()
-            bytes_per_second = self._sample_rate * 2
-            target_prebuffer_bytes = max(4096, int(bytes_per_second * 0.18))
-
-            started = time.monotonic()
-            producer = threading.Thread(
-                target=produce_audio,
-                daemon=True,
-                name="jarvis-tts-live-stream" if live else "jarvis-tts-stream",
-            )
-            producer.start()
-
-            prebuffer = bytearray()
-            source_finished = False
-            while len(prebuffer) < target_prebuffer_bytes and not self._interrupt.is_set():
-                try:
-                    item = audio_queue.get(timeout=0.10)
-                except queue.Empty:
-                    if producer is not None and not producer.is_alive():
-                        break
-                    continue
-
-                if item is None:
-                    source_finished = True
-                    break
-                if isinstance(item, Exception):
-                    raise item
-                prebuffer.extend(item)
-
-            if not prebuffer or self._interrupt.is_set():
-                return
-
             stream = sd.RawOutputStream(
                 samplerate=self._sample_rate,
                 channels=1,
@@ -370,30 +277,27 @@ class CosyVoiceProxyTTS:
                 latency="low",
             )
             stream.start()
-            first_audio_seconds = time.monotonic() - started
-            buffered_seconds = len(prebuffer) / float(max(1, self._sample_rate * 2))
-            mode = "brain→tts-live" if live else "streaming"
-            print(
-                f"[TTS] primo_audio={first_audio_seconds:.2f}s · "
-                f"prebuffer={buffered_seconds:.2f}s · "
-                f"frasi_avviate={segment_counter[0]} · playback={mode}"
-            )
-            stream.write(bytes(prebuffer))
 
-            while not source_finished and not self._interrupt.is_set():
-                try:
-                    item = audio_queue.get(timeout=0.10)
-                except queue.Empty:
-                    if producer is not None and not producer.is_alive():
-                        break
-                    continue
-
-                if item is None:
+            for chunk in pcm_chunks:
+                if self._interrupt.is_set():
                     break
-                if isinstance(item, Exception):
-                    raise item
-                if item:
-                    stream.write(item)
+                if not chunk:
+                    continue
+                data = carry + chunk
+                carry = b""
+                if len(data) % 2:
+                    carry = data[-1:]
+                    data = data[:-1]
+                if not data:
+                    continue
+                if first_audio is None:
+                    first_audio = time.monotonic() - started
+                    print(
+                        f"[TTS] primo_audio={first_audio:.2f}s · "
+                        f"playback={label}"
+                    )
+                total_bytes += len(data)
+                stream.write(data)
         finally:
             if stream is not None:
                 try:
@@ -401,16 +305,118 @@ class CosyVoiceProxyTTS:
                     stream.close()
                 except Exception:
                     pass
-            self._speaking.clear()
-            self._interrupt.clear()
+            if first_audio is not None:
+                audio_seconds = total_bytes / float(max(1, self._sample_rate * 2))
+                print(f"[TTS] audio_riprodotto={audio_seconds:.2f}s · playback={label}")
 
     def speak_text_stream(self, chunks: Iterator[str]) -> None:
-        self._play_segments(self._segments_from_live_text(chunks), live=True)
+        """Feed live LLM text into one native CosyVoice3 bistream session."""
+        import sounddevice as sd  # noqa: F401 - dependency check before session start
+
+        health = self._health()
+        if not health.get("bistream"):
+            # Backwards-compatible fallback for an older voice service.
+            full_text = "".join(str(chunk or "") for chunk in chunks)
+            self.speak(full_text, streamed=True)
+            return
+
+        self._interrupt.clear()
+        self._speaking.set()
+        session_id: str | None = None
+        audio_thread: threading.Thread | None = None
+        audio_errors: list[Exception] = []
+        packets_sent = 0
+        turn_started = time.monotonic()
+
+        try:
+            start = httpx.post(
+                f"{self.base_url}/tts/bistream/start",
+                timeout=3.0,
+            )
+            start.raise_for_status()
+            payload = start.json()
+            session_id = str(payload["session_id"])
+            self._active_bistream_session = session_id
+            rate = int(payload.get("sample_rate") or self._sample_rate)
+            if rate > 0:
+                self._sample_rate = rate
+
+            def consume_audio() -> None:
+                try:
+                    with httpx.stream(
+                        "GET",
+                        f"{self.base_url}/tts/bistream/{session_id}/audio",
+                        timeout=self.timeout_seconds,
+                    ) as response:
+                        self._active_response = response
+                        response.raise_for_status()
+                        response_rate = int(response.headers.get("X-Sample-Rate") or self._sample_rate)
+                        if response_rate > 0:
+                            self._sample_rate = response_rate
+                        self._play_pcm_iterator(
+                            response.iter_bytes(),
+                            label="cosyvoice-bistream",
+                        )
+                except Exception as exc:
+                    audio_errors.append(exc)
+                finally:
+                    self._active_response = None
+
+            audio_thread = threading.Thread(
+                target=consume_audio,
+                daemon=True,
+                name="jarvis-cosyvoice-bistream-audio",
+            )
+            audio_thread.start()
+
+            for packet in self._segments_from_live_text(chunks):
+                if self._interrupt.is_set():
+                    break
+                response = httpx.post(
+                    f"{self.base_url}/tts/bistream/{session_id}/push",
+                    json={"text": packet},
+                    timeout=3.0,
+                )
+                response.raise_for_status()
+                packets_sent += 1
+
+        except Exception as exc:
+            raise CosyVoiceProxyError(f"Errore bistream CosyVoice: {exc}") from exc
+        finally:
+            if session_id:
+                try:
+                    httpx.post(
+                        f"{self.base_url}/tts/bistream/{session_id}/finish",
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
+
+            if audio_thread is not None:
+                audio_thread.join(timeout=self.timeout_seconds)
+
+            self._active_bistream_session = None
+            self._speaking.clear()
+
+        if audio_errors:
+            raise CosyVoiceProxyError(f"Playback bistream fallito: {audio_errors[0]}")
+
+        print(
+            f"[TTS] bistream_completo={time.monotonic() - turn_started:.2f}s · "
+            f"pacchetti_testo={packets_sent}"
+        )
+        self._interrupt.clear()
 
     def speak(self, text: str, streamed: bool = True) -> None:
         del streamed
         clean = self._clean_for_speech(text)
-        segments = self._speech_segments(clean)
-        if not segments:
+        if not clean:
             return
-        self._play_segments(iter(segments), live=False)
+
+        self._interrupt.clear()
+        self._speaking.set()
+        try:
+            self._play_pcm_iterator(self.stream_pcm(clean), label="cosyvoice-stream")
+        finally:
+            self._speaking.clear()
+            self._interrupt.clear()
