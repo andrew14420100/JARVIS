@@ -96,6 +96,35 @@ export default function App() {
   }, [sendVoiceMessage]);
 
   useEffect(() => {
+    const onVoiceState = (event) => {
+      const state = String(event?.detail?.state || '').toLowerCase();
+      if (state === 'listening') {
+        changeMode('LISTENING');
+        setHint('La ascolto, signore.');
+      } else if (state === 'standby') {
+        if (visualStateRef.current !== 'THINKING' && visualStateRef.current !== 'SPEAKING') {
+          changeMode('IDLE');
+        }
+        setHint('Dica “Jarvis” per richiamare la mia attenzione.');
+      } else if (state === 'submitted') {
+        changeMode('THINKING');
+        setHint('');
+      } else if (state === 'blocked') {
+        changeMode('WAITING');
+        setHint('Microfono bloccato. Consenta il microfono al sito; se usa la preview Emergent, apra il sito in una nuova scheda.');
+      } else if (state === 'unsupported') {
+        changeMode('WAITING');
+        setHint('Il riconoscimento vocale richiede Chrome o Edge aggiornato.');
+      } else if (state === 'recognition-error') {
+        setHint('Riconoscimento vocale momentaneamente non disponibile. Riprovo automaticamente.');
+      }
+    };
+
+    window.addEventListener('jarvis:voice-state', onVoiceState);
+    return () => window.removeEventListener('jarvis:voice-state', onVoiceState);
+  }, [changeMode]);
+
+  useEffect(() => {
     const updateClock = () => setClock(new Date().toLocaleTimeString('it-IT', { hour12: false }));
     updateClock();
     const timer = setInterval(updateClock, 1000);
