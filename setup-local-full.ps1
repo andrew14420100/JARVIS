@@ -19,6 +19,27 @@ function Assert-LastExit([string]$Step) {
     }
 }
 
+function Find-CondaExe {
+    $command = Get-Command conda -ErrorAction SilentlyContinue
+    if ($command -and $command.Source) {
+        return $command.Source
+    }
+
+    $candidates = @(
+        (Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:LOCALAPPDATA "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe"),
+        (Join-Path $env:LOCALAPPDATA "anaconda3\Scripts\conda.exe"),
+        (Join-Path $env:ProgramData "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:ProgramData "anaconda3\Scripts\conda.exe")
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    if ($candidates.Count -gt 0) {
+        return $candidates[0]
+    }
+    return $null
+}
+
 function Set-EnvValue([string]$Key, [string]$Value) {
     $envPath = Join-Path $PSScriptRoot ".env"
     if (-not (Test-Path $envPath)) {
@@ -142,10 +163,11 @@ $cosyModel = Join-Path $PSScriptRoot ".local\cosyvoice\models\Fun-CosyVoice3-0.5
 $cosyInstalled = (Test-Path $cosyRepo) -and (Test-Path $cosyModel)
 
 if (-not $cosyInstalled -and -not $SkipCosyVoiceSetup) {
-    $conda = Get-Command conda -ErrorAction SilentlyContinue
-    if (-not $conda) {
-        Write-Warning "Conda non trovato. Installa Miniconda e poi esegui .\setup-cosyvoice.ps1"
+    $condaExe = Find-CondaExe
+    if (-not $condaExe) {
+        Write-Warning "Conda non trovato automaticamente. Installa Miniconda oppure esegui .\setup-cosyvoice.ps1 dopo aver verificato il percorso di conda.exe."
     } else {
+        Write-Host "Conda rilevato: $condaExe" -ForegroundColor Green
         Write-Host "CosyVoice non ancora installato: avvio setup dedicato..."
         powershell -ExecutionPolicy Bypass -File ".\setup-cosyvoice.ps1"
         Assert-LastExit "Setup CosyVoice"
