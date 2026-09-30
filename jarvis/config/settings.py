@@ -56,7 +56,9 @@ class Settings(BaseSettings):
 
     voice_enabled: bool = False
     wake_model: str = "hey_jarvis"
-    wake_threshold: float = 0.50
+    # The stock model is trained for "hey jarvis", but a slightly more
+    # sensitive threshold makes the shorter "Jarvis" invocation practical.
+    wake_threshold: float = 0.35
     wake_chunk_size: int = 1280
 
     stt_model: str = "small"
