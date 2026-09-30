@@ -5,22 +5,16 @@ let submitted = false;
 let speaking = false;
 let greetingSpoken = false;
 let retryOnGestureInstalled = false;
+let activeAudio = null;
+let activeAudioUrl = '';
 
 const RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 const FOLLOWUP_MS = 12000;
+const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 
 function setHint(text) {
   const hint = document.querySelector('.hint');
   if (hint) hint.textContent = text || '';
-}
-
-function chooseItalianVoice() {
-  const voices = window.speechSynthesis?.getVoices?.() || [];
-  return (
-    voices.find((voice) => /^it[-_]/i.test(voice.lang) && /male|cosimo|diego|luca|marco|riccardo/i.test(voice.name)) ||
-    voices.find((voice) => /^it[-_]/i.test(voice.lang)) ||
-    null
-  );
 }
 
 function stopRecognition() {
@@ -32,6 +26,20 @@ function stopRecognition() {
   }
   recognition = null;
   recognitionRunning = false;
+}
+
+function stopAudio() {
+  if (activeAudio) {
+    try {
+      activeAudio.pause();
+      activeAudio.src = '';
+    } catch {
+      // Ignore media cleanup races.
+    }
+  }
+  activeAudio = null;
+  if (activeAudioUrl) URL.revokeObjectURL(activeAudioUrl);
+  activeAudioUrl = '';
 }
 
 function emitVoiceInput(text) {
@@ -98,7 +106,7 @@ function startRecognitionWindow() {
 
     submitted = true;
     stopRecognition();
-    setHint('Un momento, signore…');
+    setHint('');
     emitVoiceInput(text);
   };
 
@@ -150,62 +158,97 @@ async function openFollowupWindow(duration = FOLLOWUP_MS) {
   startRecognitionWindow();
 }
 
-function speak(text, { openFollowup = true, greeting = false } = {}) {
+function completeSpeech({ openFollowup, greeting }) {
+  speaking = false;
+  if (greeting) greetingSpoken = true;
+  stopAudio();
+  if (openFollowup) openFollowupWindow();
+}
+
+async function playGeneratedAudio(blob, options) {
+  stopAudio();
+  activeAudioUrl = URL.createObjectURL(blob);
+  activeAudio = new Audio(activeAudioUrl);
+  activeAudio.preload = 'auto';
+  activeAudio.onplaying = () => {
+    speaking = true;
+    setHint('');
+  };
+  activeAudio.onended = () => completeSpeech(options);
+  activeAudio.onerror = () => {
+    setHint('La voce non è disponibile in questo momento.');
+    completeSpeech(options);
+  };
+
+  try {
+    await activeAudio.play();
+  } catch (error) {
+    // Browsers can block the first unsolicited audio playback. Keep the Fish
+    // audio already generated and retry the exact same clip on the first gesture.
+    if (error?.name === 'NotAllowedError') {
+      setHint('La voce è pronta. Tocchi o clicchi una volta per consentire l’audio del browser.');
+      installGestureRetry(async () => {
+        try {
+          if (activeAudio) await activeAudio.play();
+        } catch (retryError) {
+          console.warn('[JARVIS] Audio playback retry failed:', retryError);
+          completeSpeech(options);
+        }
+      });
+      return;
+    }
+    console.warn('[JARVIS] Audio playback failed:', error);
+    setHint('La voce non è disponibile in questo momento.');
+    completeSpeech(options);
+  }
+}
+
+async function speak(text, { openFollowup = true, greeting = false } = {}) {
   const content = String(text || '').trim();
-  if (!content) return;
-
-  stopRecognition();
-  followupDeadline = 0;
-
-  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+  if (!content) {
     if (openFollowup) openFollowupWindow();
     return;
   }
 
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(content);
-  utterance.lang = 'it-IT';
-  utterance.rate = 0.96;
-  utterance.pitch = 0.88;
-  utterance.volume = 1;
-  const voice = chooseItalianVoice();
-  if (voice) utterance.voice = voice;
+  stopRecognition();
+  followupDeadline = 0;
+  speaking = true;
+  setHint('');
 
-  let started = false;
-  utterance.onstart = () => {
-    started = true;
-    speaking = true;
-    setHint('');
-  };
+  try {
+    const response = await fetch(`${API_BASE}/api/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: content }),
+    });
 
-  utterance.onend = () => {
+    if (!response.ok) {
+      let detail = 'Fish Audio S2 Pro non disponibile.';
+      try {
+        const payload = await response.json();
+        detail = payload.detail || detail;
+      } catch {
+        // Keep the generic error.
+      }
+      throw new Error(detail);
+    }
+
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('Fish Audio ha restituito un audio vuoto.');
+    await playGeneratedAudio(blob, { openFollowup, greeting });
+  } catch (error) {
     speaking = false;
-    if (greeting) greetingSpoken = true;
+    console.warn('[JARVIS] Fish S2 TTS:', error);
+    setHint('La voce Fish S2 è temporaneamente non disponibile.');
     if (openFollowup) openFollowupWindow();
-  };
-
-  utterance.onerror = () => {
-    speaking = false;
-    if (openFollowup) openFollowupWindow();
-  };
-
-  window.speechSynthesis.speak(utterance);
-
-  // Some browsers block unsolicited speech until the first user gesture.
-  window.setTimeout(() => {
-    if (started) return;
-    window.speechSynthesis.cancel();
-    setHint('JARVIS è pronto. Tocchi o clicchi una volta sulla pagina per abilitare la voce del browser.');
-    installGestureRetry(() => speak(content, { openFollowup, greeting }));
-  }, 900);
+  }
 }
 
 window.addEventListener('jarvis:greeting', (event) => {
   if (greetingSpoken) return;
-  speak(event?.detail?.text || 'Buongiorno, signore. Come sta oggi?', {
-    openFollowup: true,
-    greeting: true,
-  });
+  const text = String(event?.detail?.text || '').trim();
+  if (!text) return;
+  speak(text, { openFollowup: true, greeting: true });
 });
 
 window.addEventListener('jarvis:reply-ready', (event) => {
@@ -214,5 +257,5 @@ window.addEventListener('jarvis:reply-ready', (event) => {
 
 window.addEventListener('beforeunload', () => {
   stopRecognition();
-  window.speechSynthesis?.cancel?.();
+  stopAudio();
 });
