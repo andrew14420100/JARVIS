@@ -76,30 +76,36 @@ class LocalSTT:
             self._model_device = "cpu"
         return self._model
 
+    def _transcribe_once(self, model, audio):
+        """Run one Whisper pass and eagerly consume the lazy segment generator.
+
+        CTranslate2 can successfully construct a CUDA model and only fail later
+        when the first segment is consumed (for example if cublas64_12.dll is
+        missing on Windows). Materialising the generator inside this helper
+        keeps that failure inside the GPU fallback path.
+        """
+        segments, info = model.transcribe(
+            audio,
+            beam_size=3,
+            language=self.language or None,
+            vad_filter=True,
+        )
+        segments = list(segments)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+        detected = getattr(info, "language", None)
+        return STTResult(text=text, language=detected)
+
     def transcribe(self, audio, sample_rate: int = 16000) -> STTResult:
         del sample_rate  # faster-whisper accepts the 16 kHz float array directly.
         model = self._load_model()
         try:
-            segments, info = model.transcribe(
-                audio,
-                beam_size=3,
-                language=self.language or None,
-                vad_filter=True,
-            )
-        except Exception:
+            return self._transcribe_once(model, audio)
+        except Exception as exc:
             if self._model_device != "cpu":
+                print(f"[STT] GPU non disponibile ({exc}); fallback CPU.")
                 model = self._load_model(force_cpu=True)
-                segments, info = model.transcribe(
-                    audio,
-                    beam_size=3,
-                    language=self.language or None,
-                    vad_filter=True,
-                )
-            else:
-                raise
-        text = " ".join(segment.text.strip() for segment in segments).strip()
-        detected = getattr(info, "language", None)
-        return STTResult(text=text, language=detected)
+                return self._transcribe_once(model, audio)
+            raise
 
     def record_until_silence(
         self,
