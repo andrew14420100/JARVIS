@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -20,8 +21,8 @@ class TTSRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.7, le=1.3)
 
 
-def build_app(cosyvoice, speaker_id: str, model_name: str) -> FastAPI:
-    app = FastAPI(title="JARVIS Local Voice", version="1.1")
+def build_app(cosyvoice, speaker_id: str, model_name: str, device: str) -> FastAPI:
+    app = FastAPI(title="JARVIS Emergent Voice", version="1.2")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
@@ -34,11 +35,13 @@ def build_app(cosyvoice, speaker_id: str, model_name: str) -> FastAPI:
     def health():
         return {
             "ok": True,
-            "provider": "cosyvoice3-local",
+            "provider": "cosyvoice3-emergent",
             "model": model_name,
+            "device": device,
             "sample_rate": int(cosyvoice.sample_rate),
             "reference_voice_configured": True,
             "speaker_cached": True,
+            "model_warm": True,
             "streaming": True,
         }
 
@@ -52,7 +55,7 @@ def build_app(cosyvoice, speaker_id: str, model_name: str) -> FastAPI:
             try:
                 # The reference voice is converted to a reusable speaker profile
                 # once at startup. Every subsequent phrase avoids re-encoding the
-                # WAV and can begin streaming audio sooner.
+                # WAV and starts yielding PCM as soon as CosyVoice has a chunk.
                 output = cosyvoice.inference_zero_shot(
                     clean,
                     "",
@@ -79,7 +82,8 @@ def build_app(cosyvoice, speaker_id: str, model_name: str) -> FastAPI:
                 "Cache-Control": "no-store",
                 "X-Sample-Rate": str(int(cosyvoice.sample_rate)),
                 "X-Audio-Format": "pcm_s16le_mono",
-                "X-JARVIS-TTS-Provider": "cosyvoice3-local",
+                "X-JARVIS-TTS-Provider": "cosyvoice3-emergent",
+                "X-JARVIS-TTS-Device": device,
             },
         )
 
@@ -112,8 +116,19 @@ def main() -> None:
     sys.path.insert(0, str(repo))
     sys.path.insert(0, str(repo / "third_party" / "Matcha-TTS"))
 
+    import torch
     from cosyvoice.cli.cosyvoice import AutoModel
     from cosyvoice.utils.file_utils import load_wav
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        try:
+            device_name = torch.cuda.get_device_name(0)
+        except Exception:
+            device_name = "CUDA"
+        print(f"[COSYVOICE] Device: cuda · {device_name}")
+    else:
+        print("[COSYVOICE] Device: CPU · latenza più elevata")
 
     prompt_transcript = reference_text_file.read_text(encoding="utf-8").strip()
     if not prompt_transcript:
@@ -130,6 +145,24 @@ def main() -> None:
     if not cosyvoice.add_zero_shot_spk(prompt_text, prompt_speech_16k, JARVIS_SPEAKER_ID):
         raise SystemExit("CosyVoice non è riuscito a registrare la voce di riferimento.")
 
+    # Warm the inference path once. This is intentionally done before the HTTP
+    # service becomes ready so the first real JARVIS sentence does not pay the
+    # lazy CUDA/kernel/model initialization cost.
+    warm_started = time.perf_counter()
+    try:
+        for _ in cosyvoice.inference_zero_shot(
+            "Pronto.",
+            "",
+            "",
+            zero_shot_spk_id=JARVIS_SPEAKER_ID,
+            stream=True,
+            speed=1.0,
+        ):
+            pass
+        print(f"[COSYVOICE] Warm-up completato in {time.perf_counter() - warm_started:.2f}s")
+    except Exception as exc:
+        print(f"[COSYVOICE] Warm-up non riuscito, continuo comunque: {exc}", file=sys.stderr)
+
     print(
         f"[COSYVOICE] Pronto · speaker in memoria · "
         f"sample rate {cosyvoice.sample_rate} Hz"
@@ -138,6 +171,7 @@ def main() -> None:
         cosyvoice,
         JARVIS_SPEAKER_ID,
         "Fun-CosyVoice3-0.5B-2512",
+        device,
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
