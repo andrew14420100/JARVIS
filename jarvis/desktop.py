@@ -13,7 +13,8 @@ from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
 
 
-ACOUSTIC_GUARD_SECONDS = 0.28
+ACOUSTIC_GUARD_SECONDS = 0.24
+POST_WAKE_CAPTURE_DELAY_SECONDS = 0.38
 
 
 def _post_wake_speech_profile(audio, *, sample_rate: int = 16000) -> tuple[bool, float, float, float]:
@@ -108,7 +109,6 @@ def main() -> None:
     agent = get_orchestrator()
 
     def acoustic_guard() -> None:
-        """Let loudspeaker/reverb tail decay before reopening the microphone."""
         time.sleep(ACOUSTIC_GUARD_SECONDS)
 
     def interrupt() -> None:
@@ -214,11 +214,13 @@ def main() -> None:
             return
         busy.set()
 
-        time.sleep(0.62)
+        # Capture just enough post-wake audio to distinguish "Jarvis" from
+        # "Jarvis, <command>" without adding a noticeable conversational pause.
+        time.sleep(POST_WAKE_CAPTURE_DELAY_SECONDS)
 
         post_wake_audio = None
         try:
-            post_wake_audio = wake.post_wake_audio(seconds=0.75, exclude_head_seconds=0.18)
+            post_wake_audio = wake.post_wake_audio(seconds=0.58, exclude_head_seconds=0.14)
         except Exception:
             post_wake_audio = None
 
@@ -236,8 +238,8 @@ def main() -> None:
                     f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f}"
                 )
                 text = capture_turn(
-                    initial_silence_seconds=0.9,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 12.0),
+                    initial_silence_seconds=0.65,
+                    max_seconds=min(settings.listener_max_utterance_seconds, 10.0),
                     activation_audio=post_wake_audio,
                     activation_has_speech=True,
                 )
@@ -258,8 +260,8 @@ def main() -> None:
                         print(f"[JARVIS] TTS prompt non disponibile: {exc}")
                 print("[JARVIS] In ascolto del comando...")
                 text = capture_turn(
-                    initial_silence_seconds=3.5,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 12.0),
+                    initial_silence_seconds=2.6,
+                    max_seconds=min(settings.listener_max_utterance_seconds, 10.0),
                 )
 
             if not text:
@@ -273,8 +275,8 @@ def main() -> None:
             while not stt.abort_event.is_set():
                 print("[JARVIS] Conversazione attiva · ascolto...")
                 followup = capture_turn(
-                    initial_silence_seconds=min(settings.listener_followup_silence_seconds, 6.0),
-                    max_seconds=min(settings.listener_max_utterance_seconds, 20.0),
+                    initial_silence_seconds=min(settings.listener_followup_silence_seconds, 4.5),
+                    max_seconds=min(settings.listener_max_utterance_seconds, 16.0),
                 )
                 if not stt.last_recording_heard_speech and not followup:
                     print("[JARVIS] Standby.")
