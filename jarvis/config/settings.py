@@ -32,9 +32,9 @@ class Settings(BaseSettings):
     stt_language: str = "it"
 
     tts_enabled: bool = True
-    tts_voice: str = "af_heart"
+    tts_voice: str = "im_nicola"
     tts_speed: float = 1.05
-    tts_lang_code: str = "a"
+    tts_lang_code: str = "i"
 
     model_config = SettingsConfigDict(
         env_prefix="JARVIS_",
