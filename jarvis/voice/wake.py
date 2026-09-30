@@ -125,13 +125,36 @@ class WakeWordListener:
 
         return max(matches, key=lambda item: item[1])
 
+    @staticmethod
+    def _looks_like_real_microphone(name: str) -> bool:
+        """Recognize microphone labels without matching the 'mic' in Microsoft."""
+        normalized = str(name).casefold().strip()
+        tokens = (
+            normalized.replace("(", " ")
+            .replace(")", " ")
+            .replace("[", " ")
+            .replace("]", " ")
+            .replace("-", " ")
+            .replace("_", " ")
+            .replace("/", " ")
+            .split()
+        )
+        return (
+            normalized.startswith("microfono")
+            or normalized.startswith("microphone")
+            or "microfono" in tokens
+            or "microphone" in tokens
+            or "mic" in tokens
+            or "headset mic" in normalized
+            or "headset microphone" in normalized
+        )
+
     def _candidate_input_devices(self, sd) -> list[int]:
         """Return Windows input candidates in a useful order.
 
-        PortAudio can expose digital interfaces, monitor/loopback endpoints and
-        real microphones at the same time. The Windows default is not always a
-        usable microphone, so prefer devices whose names explicitly look like a
-        microphone and only then try the remaining input endpoints.
+        Explicit configuration wins. Otherwise real microphone-looking devices
+        are tried before generic mapper/digital/loopback endpoints. This avoids
+        treating the 'mic' prefix inside 'Microsoft Sound Mapper' as a microphone.
         """
         devices = list(sd.query_devices())
         input_indexes = [
@@ -160,10 +183,10 @@ class WakeWordListener:
                     if wanted and wanted in str(devices[index].get("name", "")).casefold():
                         add(index)
 
-        microphone_words = ("microfono", "microphone", "headset mic", "headset microphone", " mic", "mic ")
+        # Prefer real microphones before Windows mapper/digital endpoints.
         for index in input_indexes:
-            name = f" {str(devices[index].get('name', '')).casefold()} "
-            if any(word in name for word in microphone_words):
+            name = str(devices[index].get("name", ""))
+            if self._looks_like_real_microphone(name):
                 add(index)
 
         try:
@@ -174,8 +197,7 @@ class WakeWordListener:
         except Exception:
             pass
 
-        # Last resort: any remaining capture endpoint. Digital/loopback devices
-        # are deliberately tried after microphone-looking endpoints.
+        # Last resort: any remaining capture endpoint.
         for index in input_indexes:
             add(index)
         return ordered
