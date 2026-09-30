@@ -5,4 +5,5 @@ psutil>=6,<8
 pydantic>=2.8,<3
 pydantic-settings>=2.4,<3
 gradio_client>=2.0,<3
+edge-tts>=7,<8
 pytest>=8,<9
