@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from typing import Any
 
 
 class WakeWordListener:
@@ -10,6 +12,10 @@ class WakeWordListener:
 
     `pause()` is used while STT owns the microphone, preventing two audio
     streams from fighting for the same Windows input device.
+
+    The listener also keeps a short in-memory ring buffer of recent PCM audio.
+    This makes it possible to reconstruct conversational context *before* the
+    wake phrase without persisting ambient audio to disk.
     """
 
     def __init__(
@@ -18,13 +24,18 @@ class WakeWordListener:
         threshold: float = 0.50,
         chunk_size: int = 1280,
         sample_rate: int = 16000,
+        context_seconds: float = 30.0,
     ) -> None:
         self.model_name = model_name
         self.threshold = threshold
         self.chunk_size = chunk_size
         self.sample_rate = sample_rate
+        self.context_seconds = max(2.0, context_seconds)
         self._stop = threading.Event()
         self._pause = threading.Event()
+        self._audio_lock = threading.RLock()
+        chunks = max(1, int((self.context_seconds * self.sample_rate) / self.chunk_size))
+        self._recent_pcm: deque[Any] = deque(maxlen=chunks)
 
     @staticmethod
     def dependency_status() -> dict[str, bool]:
@@ -53,8 +64,42 @@ class WakeWordListener:
         self._stop.clear()
         self._pause.clear()
 
-    def run(self, callback: Callable[[], None], busy: Callable[[], bool] | None = None,
-            interrupt: Callable[[], None] | None = None) -> None:
+    def clear_recent_audio(self) -> None:
+        with self._audio_lock:
+            self._recent_pcm.clear()
+
+    def recent_audio(self, seconds: float | None = None, *, exclude_tail_seconds: float = 0.8):
+        """Return recent ambient audio as float32 mono samples in [-1, 1].
+
+        Audio is held only in RAM. `exclude_tail_seconds` removes the wake-word
+        tail so the ambient transcript is less likely to duplicate "Hey Jarvis".
+        """
+        import numpy as np
+
+        with self._audio_lock:
+            chunks = [chunk.copy() for chunk in self._recent_pcm]
+        if not chunks:
+            return np.zeros(0, dtype=np.float32)
+
+        audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+        max_seconds = self.context_seconds if seconds is None else max(0.0, min(seconds, self.context_seconds))
+        max_samples = int(max_seconds * self.sample_rate)
+        if max_samples > 0 and audio.size > max_samples:
+            audio = audio[-max_samples:]
+
+        trim = int(max(0.0, exclude_tail_seconds) * self.sample_rate)
+        if trim and audio.size > trim:
+            audio = audio[:-trim]
+        elif trim:
+            return np.zeros(0, dtype=np.float32)
+        return audio
+
+    def run(
+        self,
+        callback: Callable[[], None],
+        busy: Callable[[], bool] | None = None,
+        interrupt: Callable[[], None] | None = None,
+    ) -> None:
         import numpy as np
         import sounddevice as sd
         from openwakeword.model import Model
@@ -78,7 +123,10 @@ class WakeWordListener:
                 data, overflowed = stream.read(self.chunk_size)
                 if overflowed:
                     continue
-                pcm = np.frombuffer(data, dtype=np.int16)
+                pcm = np.frombuffer(data, dtype=np.int16).copy()
+                with self._audio_lock:
+                    self._recent_pcm.append(pcm)
+
                 predictions = model.predict(pcm)
                 score = float(predictions.get(self.model_name, 0.0))
                 if score < self.threshold:
