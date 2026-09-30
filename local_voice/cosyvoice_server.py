@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 from pathlib import Path
+import queue
 import sys
+import threading
 import time
+import uuid
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -21,6 +25,28 @@ class TTSRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.7, le=1.3)
 
 
+class BistreamPushRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+
+
+@dataclass
+class BistreamSession:
+    session_id: str
+    text_queue: queue.Queue[str | None] = field(default_factory=queue.Queue)
+    audio_queue: queue.Queue[bytes | Exception | None] = field(default_factory=queue.Queue)
+    created_at: float = field(default_factory=time.monotonic)
+    finished: threading.Event = field(default_factory=threading.Event)
+    worker: threading.Thread | None = None
+
+
+def _pcm_bytes(audio) -> bytes:
+    arr = audio.detach().float().cpu().numpy().reshape(-1)
+    if not np.isfinite(arr).all():
+        raise RuntimeError("CosyVoice ha prodotto campioni audio non finiti")
+    arr = np.clip(arr, -1.0, 1.0)
+    return (arr * 32767.0).astype(np.int16).tobytes()
+
+
 def build_app(
     cosyvoice,
     speaker_id: str,
@@ -28,7 +54,7 @@ def build_app(
     device: str,
     precision: str,
 ) -> FastAPI:
-    app = FastAPI(title="JARVIS Emergent Voice", version="1.4")
+    app = FastAPI(title="JARVIS Emergent Voice", version="1.5")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
@@ -37,8 +63,77 @@ def build_app(
         allow_headers=["*"],
     )
 
+    sessions: dict[str, BistreamSession] = {}
+    sessions_lock = threading.Lock()
+
+    def get_session(session_id: str) -> BistreamSession:
+        with sessions_lock:
+            session = sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Sessione TTS non trovata")
+        return session
+
+    def cleanup_session(session_id: str) -> None:
+        with sessions_lock:
+            sessions.pop(session_id, None)
+
+    def run_bistream(session: BistreamSession) -> None:
+        started = time.perf_counter()
+        first_packet = None
+        chunks = 0
+        samples = 0
+
+        def text_generator():
+            while True:
+                item = session.text_queue.get()
+                if item is None:
+                    break
+                clean = " ".join(str(item).strip().split())
+                if clean:
+                    yield clean
+
+        try:
+            output = cosyvoice.inference_zero_shot(
+                text_generator(),
+                "",
+                "",
+                zero_shot_spk_id=speaker_id,
+                stream=True,
+                speed=1.0,
+            )
+            for item in output:
+                audio = item.get("tts_speech")
+                if audio is None:
+                    continue
+                pcm = _pcm_bytes(audio)
+                chunks += 1
+                samples += len(pcm) // 2
+                if first_packet is None:
+                    first_packet = time.perf_counter() - started
+                    audio_seconds = (len(pcm) // 2) / float(max(1, cosyvoice.sample_rate))
+                    print(
+                        f"[COSYVOICE-BISTREAM] first-packet={first_packet:.2f}s · "
+                        f"chunk_audio={audio_seconds:.2f}s · precision={precision}"
+                    )
+                session.audio_queue.put(pcm)
+        except Exception as exc:
+            print(f"[COSYVOICE-BISTREAM] synthesis error: {exc}", file=sys.stderr)
+            session.audio_queue.put(exc)
+        finally:
+            elapsed = time.perf_counter() - started
+            if chunks:
+                audio_seconds = samples / float(max(1, cosyvoice.sample_rate))
+                print(
+                    f"[COSYVOICE-BISTREAM] complete={elapsed:.2f}s · "
+                    f"audio={audio_seconds:.2f}s · chunks={chunks}"
+                )
+            session.finished.set()
+            session.audio_queue.put(None)
+
     @app.get("/health")
     def health():
+        with sessions_lock:
+            active_bistream = len(sessions)
         return {
             "ok": True,
             "provider": "cosyvoice3-local",
@@ -50,6 +145,8 @@ def build_app(
             "speaker_cached": True,
             "model_warm": True,
             "streaming": True,
+            "bistream": True,
+            "active_bistream_sessions": active_bistream,
         }
 
     @app.post("/tts")
@@ -76,22 +173,19 @@ def build_app(
                     audio = item.get("tts_speech")
                     if audio is None:
                         continue
-                    arr = audio.detach().float().cpu().numpy().reshape(-1)
-                    if not np.isfinite(arr).all():
-                        raise RuntimeError("CosyVoice ha prodotto campioni audio non finiti")
-                    arr = np.clip(arr, -1.0, 1.0)
+                    pcm = _pcm_bytes(audio)
                     chunks += 1
-                    samples += int(arr.size)
+                    samples += len(pcm) // 2
                     if not first_chunk_logged:
                         first_chunk_logged = True
                         first_packet = time.perf_counter() - request_started
-                        audio_seconds = arr.size / float(max(1, cosyvoice.sample_rate))
+                        audio_seconds = (len(pcm) // 2) / float(max(1, cosyvoice.sample_rate))
                         print(
                             f"[COSYVOICE] first-packet={first_packet:.2f}s · "
                             f"chunk_audio={audio_seconds:.2f}s · chars={len(clean)} · "
                             f"precision={precision}"
                         )
-                    yield (arr * 32767.0).astype(np.int16).tobytes()
+                    yield pcm
             except Exception as exc:
                 print(f"[COSYVOICE] synthesis error: {exc}", file=sys.stderr)
                 raise
@@ -112,6 +206,73 @@ def build_app(
                 "X-Sample-Rate": str(int(cosyvoice.sample_rate)),
                 "X-Audio-Format": "pcm_s16le_mono",
                 "X-JARVIS-TTS-Provider": "cosyvoice3-local",
+                "X-JARVIS-TTS-Device": device,
+                "X-JARVIS-TTS-Precision": precision,
+            },
+        )
+
+    @app.post("/tts/bistream/start")
+    def bistream_start():
+        session_id = uuid.uuid4().hex
+        session = BistreamSession(session_id=session_id)
+        with sessions_lock:
+            sessions[session_id] = session
+        worker = threading.Thread(
+            target=run_bistream,
+            args=(session,),
+            daemon=True,
+            name=f"cosyvoice-bistream-{session_id[:8]}",
+        )
+        session.worker = worker
+        worker.start()
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "sample_rate": int(cosyvoice.sample_rate),
+        }
+
+    @app.post("/tts/bistream/{session_id}/push")
+    def bistream_push(session_id: str, request: BistreamPushRequest):
+        session = get_session(session_id)
+        if session.finished.is_set():
+            raise HTTPException(status_code=409, detail="Sessione TTS già conclusa")
+        clean = " ".join(request.text.strip().split())
+        if clean:
+            session.text_queue.put(clean)
+        return {"ok": True}
+
+    @app.post("/tts/bistream/{session_id}/finish")
+    def bistream_finish(session_id: str):
+        session = get_session(session_id)
+        if not session.finished.is_set():
+            session.text_queue.put(None)
+        return {"ok": True}
+
+    @app.get("/tts/bistream/{session_id}/audio")
+    def bistream_audio(session_id: str):
+        session = get_session(session_id)
+
+        def generate():
+            try:
+                while True:
+                    item = session.audio_queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    if item:
+                        yield item
+            finally:
+                cleanup_session(session_id)
+
+        return StreamingResponse(
+            generate(),
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Sample-Rate": str(int(cosyvoice.sample_rate)),
+                "X-Audio-Format": "pcm_s16le_mono",
+                "X-JARVIS-TTS-Provider": "cosyvoice3-local-bistream",
                 "X-JARVIS-TTS-Device": device,
                 "X-JARVIS-TTS-Precision": precision,
             },
@@ -168,8 +329,7 @@ def main() -> None:
                 f"sm_{capability[0]}{capability[1]} · torch {torch.__version__} · {precision}"
             )
         except Exception:
-            device_name = "CUDA"
-            print(f"[COSYVOICE] Device: cuda · {device_name} · torch {torch.__version__} · {precision}")
+            print(f"[COSYVOICE] Device: cuda · torch {torch.__version__} · {precision}")
     else:
         print("[COSYVOICE] Device: CPU · fp32 · latenza più elevata")
 
@@ -181,6 +341,13 @@ def main() -> None:
 
     print(f"[COSYVOICE] Carico Fun-CosyVoice3-0.5B · precisione {precision}...")
     try:
+        cosyvoice = AutoModel(
+            model_dir=str(model_dir),
+            load_trt=False,
+            load_vllm=False,
+            fp16=use_fp16,
+        )
+    except TypeError:
         cosyvoice = AutoModel(
             model_dir=str(model_dir),
             load_trt=False,
@@ -196,11 +363,19 @@ def main() -> None:
         )
         use_fp16 = False
         precision = "fp32"
-        cosyvoice = AutoModel(
-            model_dir=str(model_dir),
-            load_trt=False,
-            fp16=False,
-        )
+        try:
+            cosyvoice = AutoModel(
+                model_dir=str(model_dir),
+                load_trt=False,
+                load_vllm=False,
+                fp16=False,
+            )
+        except TypeError:
+            cosyvoice = AutoModel(
+                model_dir=str(model_dir),
+                load_trt=False,
+                fp16=False,
+            )
 
     print("[COSYVOICE] Precalcolo il profilo della voce JARVIS...")
     if not cosyvoice.add_zero_shot_spk(prompt_text, str(reference_audio), JARVIS_SPEAKER_ID):
@@ -227,7 +402,7 @@ def main() -> None:
 
     print(
         f"[COSYVOICE] Pronto · speaker in memoria · "
-        f"sample rate {cosyvoice.sample_rate} Hz · {precision}"
+        f"sample rate {cosyvoice.sample_rate} Hz · {precision} · bistream ON"
     )
     app = build_app(
         cosyvoice,
