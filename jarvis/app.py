@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -16,7 +18,14 @@ registry = build_default_registry()
 orchestrator: JarvisOrchestrator | None = None
 WEB_DIR = Path(__file__).parent / "web"
 
-app = FastAPI(title="JARVIS", version="0.1.0")
+app = FastAPI(title="JARVIS", version="0.2.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):
