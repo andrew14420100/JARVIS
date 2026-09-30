@@ -64,9 +64,18 @@ class Settings(BaseSettings):
     stt_compute_type: str = "int8"
     stt_language: str = "it"
 
-    # Voice mode. CosyVoice 3 runs locally in a separate Python 3.10 process,
-    # keeps the cloned speaker representation warm, and streams PCM back to
-    # JARVIS. No TTS API key, credits or per-minute quota are involved.
+    # Siri-like local listener. The listener owns the Windows microphone and
+    # sends recognized turns to the JARVIS backend hosted on Emergent. Browser
+    # microphone capture is intentionally disabled by default.
+    browser_voice_input_enabled: bool = False
+    listener_remote_base_url: str = ""
+    listener_followup_silence_seconds: float = 8.0
+    listener_max_utterance_seconds: float = 45.0
+    listener_wake_ack_enabled: bool = True
+    listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
+
+    # Voice mode. CosyVoice 3 runs in a separate process, keeps the cloned
+    # speaker representation warm, and streams PCM back to JARVIS.
     tts_mode: str = "cosyvoice-local"
     cosyvoice_enabled: bool = True
     cosyvoice_service_url: str = "http://127.0.0.1:8765"
