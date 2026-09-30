@@ -107,10 +107,10 @@ try {
     Remove-Item -LiteralPath $tempRequirements -Force -ErrorAction SilentlyContinue
 }
 
-# CosyVoice currently pins torch 2.3.1+cu121, which predates NVIDIA Blackwell.
-# RTX 50-series GPUs (sm_120) require a PyTorch CUDA 12.8+ build. PyTorch
-# 2.7.1/cu128 is close enough to CosyVoice's dependency era while supporting
-# Blackwell on Windows, so override only on RTX 50-series systems.
+# CosyVoice pins torch 2.3.1+cu121, which predates NVIDIA Blackwell.
+# RTX 50-series GPUs (sm_120) require a PyTorch CUDA 12.8+ build. Upgrade only
+# torch/torchaudio themselves so pip does not replace CosyVoice-compatible
+# transitive dependencies such as fsspec and MarkupSafe.
 $gpuName = ""
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 if ($nvidiaSmi) {
@@ -123,14 +123,22 @@ if ($nvidiaSmi) {
 
 if ($gpuName -match 'RTX\s*50') {
     Write-Host "  - Rilevata $gpuName: aggiorno PyTorch/Torchaudio per Blackwell (CUDA 12.8)..." -ForegroundColor Cyan
-    & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install --upgrade --force-reinstall "torch==2.7.1" "torchaudio==2.7.1" --index-url https://download.pytorch.org/whl/cu128
+    & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install --upgrade --force-reinstall --no-deps "torch==2.7.1" "torchaudio==2.7.1" --index-url https://download.pytorch.org/whl/cu128
     Assert-LastExit "Installazione PyTorch 2.7.1 CUDA 12.8 per RTX 50"
+
+    Write-Host "  - Ripristino dipendenze compatibili con Gradio/Lightning..."
+    & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install "MarkupSafe==2.1.5" "fsspec[http]==2024.12.0"
+    Assert-LastExit "Ripristino dipendenze CosyVoice dopo upgrade Torch"
 
     & $condaExe run --no-capture-output -n jarvis-cosyvoice python -c "import torch; print('Torch', torch.__version__, 'CUDA', torch.version.cuda, 'GPU', torch.cuda.get_device_name(0), 'capability', torch.cuda.get_device_capability(0)); assert torch.cuda.is_available(); assert torch.cuda.get_device_capability(0)[0] >= 12"
     Assert-LastExit "Verifica supporto Blackwell PyTorch"
 } elseif ($gpuName) {
     Write-Host "  - GPU rilevata: $gpuName. Mantengo la build Torch richiesta da CosyVoice."
 }
+
+Write-Host "  - Verifico coerenza dipendenze Python..."
+& $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip check
+Assert-LastExit "Verifica dipendenze CosyVoice"
 
 Write-Host "  - Abilito download Hugging Face ottimizzati (hf_xet)..."
 & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install "huggingface_hub[hf_xet]>=0.27,<2"
