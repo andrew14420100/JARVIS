@@ -17,15 +17,15 @@ class CosyVoiceProxyError(RuntimeError):
 class CosyVoiceAudio:
     data: bytes
     media_type: str = "audio/wav"
-    provider: str = "cosyvoice3-local"
+    provider: str = "cosyvoice3-emergent"
 
 
 class CosyVoiceProxyTTS:
-    """Client for the local CosyVoice 3 voice-cloning service.
+    """Client for the warm CosyVoice 3 service running beside JARVIS.
 
-    The heavy TTS model runs in a separate Python 3.10 process so it does not
-    pollute the main JARVIS environment. Audio is streamed as mono signed 16-bit
-    PCM for low-latency playback.
+    On Emergent the heavy model lives in its own process on 127.0.0.1 so the
+    normal FastAPI backend remains lightweight. PCM is proxied incrementally to
+    the browser; no external TTS API, credits or per-minute quota are involved.
     """
 
     def __init__(
@@ -50,7 +50,7 @@ class CosyVoiceProxyTTS:
                 self._sample_rate = rate
             return data
         except Exception as exc:
-            raise CosyVoiceProxyError(f"CosyVoice locale non raggiungibile: {exc}") from exc
+            raise CosyVoiceProxyError(f"CosyVoice su Emergent non raggiungibile: {exc}") from exc
 
     def available(self) -> bool:
         try:
@@ -84,10 +84,11 @@ class CosyVoiceProxyTTS:
     def status(self) -> dict[str, object]:
         data: dict[str, object] = {
             "enabled": True,
-            "provider": "cosyvoice3-local",
+            "provider": "cosyvoice3-emergent",
             "remote": False,
+            "runs_on": "emergent",
             "requires_api_key": False,
-            "requires_local_gpu": True,
+            "requires_gpu": True,
             "cloned_voice": True,
             "streaming": True,
             "service_url": self.base_url,
@@ -96,14 +97,21 @@ class CosyVoiceProxyTTS:
         try:
             health = self._health()
             data.update({
+                "provider": health.get("provider") or "cosyvoice3-emergent",
                 "ready": bool(health.get("ok")),
                 "sample_rate": int(health.get("sample_rate") or self._sample_rate),
                 "model": health.get("model") or "Fun-CosyVoice3-0.5B-2512",
+                "device": health.get("device") or "unknown",
                 "reference_voice_configured": bool(health.get("reference_voice_configured")),
+                "speaker_cached": bool(health.get("speaker_cached")),
+                "model_warm": bool(health.get("model_warm")),
             })
         except Exception:
             data["ready"] = False
             data["reference_voice_configured"] = False
+            data["speaker_cached"] = False
+            data["model_warm"] = False
+            data["device"] = "unavailable"
         return data
 
     def stop(self) -> None:
@@ -146,7 +154,7 @@ class CosyVoiceProxyTTS:
                     if chunk:
                         yield chunk
         except httpx.HTTPError as exc:
-            raise CosyVoiceProxyError(f"Errore dal motore vocale locale: {exc}") from exc
+            raise CosyVoiceProxyError(f"Errore dal motore vocale Emergent: {exc}") from exc
         finally:
             self._active_response = None
 
@@ -174,8 +182,6 @@ class CosyVoiceProxyTTS:
         self._speaking.set()
         stream = None
         try:
-            # Prime health once so the correct model sample rate is known before
-            # the first PCM chunk is sent to the audio device.
             self._health()
             stream = sd.RawOutputStream(
                 samplerate=self._sample_rate,
