@@ -26,9 +26,9 @@ class CosyVoiceAudio:
 class CosyVoiceProxyTTS:
     """Client for the warm CosyVoice 3 service running beside JARVIS.
 
-    Desktop playback buffers short complete speech segments. This prevents
-    inference jitter from starving PortAudio while keeping the first spoken
-    segment short enough to start quickly.
+    Audio is consumed while CosyVoice is still generating it. A very small
+    PCM prebuffer absorbs inference jitter without forcing JARVIS to wait for
+    a complete sentence before it starts speaking.
     """
 
     def __init__(
@@ -133,8 +133,21 @@ class CosyVoiceProxyTTS:
             pass
         self._speaking.clear()
 
+    @staticmethod
+    def _clean_for_speech(text: str) -> str:
+        """Remove Markdown/control punctuation that should not be spoken."""
+        clean = str(text or "")
+        clean = re.sub(r"```(?:[\w.+-]+)?\s*", "", clean)
+        clean = clean.replace("```", "")
+        clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean)
+        clean = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", clean)
+        clean = re.sub(r"(?m)^\s*[-*+]\s+", "", clean)
+        clean = re.sub(r"(?m)^\s*\d+[.)]\s+", "", clean)
+        clean = re.sub(r"[*_~`]+", "", clean)
+        return " ".join(clean.strip().split())
+
     def stream_pcm(self, text: str) -> Iterator[bytes]:
-        clean = " ".join(str(text or "").strip().split())
+        clean = self._clean_for_speech(text)
         if not clean:
             return
 
@@ -165,6 +178,8 @@ class CosyVoiceProxyTTS:
         pcm = b"".join(self.stream_pcm(text))
         if not pcm:
             raise CosyVoiceProxyError("CosyVoice non ha restituito audio.")
+        if len(pcm) % 2:
+            pcm = pcm[:-1]
 
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as wav_file:
@@ -174,101 +189,105 @@ class CosyVoiceProxyTTS:
             wav_file.writeframes(pcm)
         return CosyVoiceAudio(buffer.getvalue())
 
-    @staticmethod
-    def _speech_segments(text: str, max_chars: int = 88) -> list[str]:
-        """Create short natural segments for quick first-speech latency."""
-        clean = " ".join(str(text or "").strip().split())
-        if not clean:
-            return []
-
-        # Commas are also useful boundaries for spoken Italian. Short segments
-        # reduce time-to-first-audio while the next segment is generated in
-        # parallel during playback.
-        rough = re.split(r"(?<=[.!?;:,])\s+", clean)
-        segments: list[str] = []
-        for part in rough:
-            part = part.strip()
-            while len(part) > max_chars:
-                cut = max(
-                    part.rfind(", ", 0, max_chars),
-                    part.rfind(" ", 0, max_chars),
-                )
-                if cut < max_chars // 2:
-                    cut = max_chars
-                segment = part[:cut].strip(" ,")
-                if segment:
-                    segments.append(segment)
-                part = part[cut:].strip(" ,")
-            if part:
-                segments.append(part)
-        return segments or [clean]
-
-    def _buffer_segment(self, text: str) -> bytes:
-        pcm = b"".join(self.stream_pcm(text))
-        if len(pcm) % 2:
-            pcm = pcm[:-1]
-        return pcm
-
     def speak(self, text: str, streamed: bool = True) -> None:
         del streamed
-        if not text or not text.strip():
+        clean = self._clean_for_speech(text)
+        if not clean:
             return
 
         import sounddevice as sd
-
-        segments = self._speech_segments(text)
-        if not segments:
-            return
 
         self._interrupt.clear()
         self._speaking.set()
         stream = None
         producer: threading.Thread | None = None
-        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=3)
+        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=24)
+
+        def queue_item(item: bytes | Exception | None) -> bool:
+            while not self._interrupt.is_set():
+                try:
+                    audio_queue.put(item, timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def produce_audio() -> None:
+            carry = b""
+            try:
+                for chunk in self.stream_pcm(clean):
+                    if self._interrupt.is_set():
+                        break
+                    data = carry + chunk
+                    carry = b""
+                    if len(data) % 2:
+                        carry = data[-1:]
+                        data = data[:-1]
+                    if data and not queue_item(data):
+                        break
+            except Exception as exc:
+                queue_item(exc)
+            finally:
+                queue_item(None)
+
         try:
             self._health()
-            first_started = time.monotonic()
-            first_pcm = self._buffer_segment(segments[0])
-            first_buffer_seconds = time.monotonic() - first_started
-            if not first_pcm or self._interrupt.is_set():
-                return
+            sample_rate = self._sample_rate
+            bytes_per_second = sample_rate * 2
+            target_prebuffer_bytes = max(4096, int(bytes_per_second * 0.30))
 
-            def produce_remaining() -> None:
+            started = time.monotonic()
+            producer = threading.Thread(
+                target=produce_audio,
+                daemon=True,
+                name="jarvis-tts-stream",
+            )
+            producer.start()
+
+            prebuffer = bytearray()
+            source_finished = False
+            while len(prebuffer) < target_prebuffer_bytes and not self._interrupt.is_set():
                 try:
-                    for segment in segments[1:]:
-                        if self._interrupt.is_set():
-                            break
-                        pcm = self._buffer_segment(segment)
-                        if pcm:
-                            audio_queue.put(pcm)
-                    audio_queue.put(None)
-                except Exception as exc:
-                    audio_queue.put(exc)
+                    item = audio_queue.get(timeout=0.10)
+                except queue.Empty:
+                    if producer is not None and not producer.is_alive():
+                        break
+                    continue
 
-            if len(segments) > 1:
-                producer = threading.Thread(
-                    target=produce_remaining,
-                    daemon=True,
-                    name="jarvis-tts-buffer",
-                )
-                producer.start()
+                if item is None:
+                    source_finished = True
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                prebuffer.extend(item)
+
+            if not prebuffer or self._interrupt.is_set():
+                return
 
             stream = sd.RawOutputStream(
                 samplerate=self._sample_rate,
                 channels=1,
                 dtype="int16",
                 blocksize=0,
-                latency="high",
+                latency="low",
             )
             stream.start()
+            first_audio_seconds = time.monotonic() - started
+            buffered_seconds = len(prebuffer) / float(max(1, self._sample_rate * 2))
             print(
-                f"[TTS] buffer iniziale={first_buffer_seconds:.2f}s · "
-                f"segmenti={len(segments)} · playback=buffered"
+                f"[TTS] primo_audio={first_audio_seconds:.2f}s · "
+                f"prebuffer={buffered_seconds:.2f}s · playback=streaming"
             )
-            stream.write(first_pcm)
+            stream.write(bytes(prebuffer))
 
-            while len(segments) > 1 and not self._interrupt.is_set():
-                item = audio_queue.get()
+            while not source_finished and not self._interrupt.is_set():
+                try:
+                    item = audio_queue.get(timeout=0.10)
+                except queue.Empty:
+                    if producer is not None and not producer.is_alive():
+                        break
+                    continue
+
                 if item is None:
                     break
                 if isinstance(item, Exception):
