@@ -24,11 +24,13 @@ class LocalSTT:
         device: str = "auto",
         compute_type: str = "int8",
         language: str = "it",
+        input_device: str | int | None = None,
     ) -> None:
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.input_device = input_device
         self._model: Any | None = None
         self._model_device: str | None = None
         self.abort_event = threading.Event()
@@ -77,13 +79,7 @@ class LocalSTT:
         return self._model
 
     def _transcribe_once(self, model, audio):
-        """Run one Whisper pass and eagerly consume the lazy segment generator.
-
-        CTranslate2 can successfully construct a CUDA model and only fail later
-        when the first segment is consumed (for example if cublas64_12.dll is
-        missing on Windows). Materialising the generator inside this helper
-        keeps that failure inside the GPU fallback path.
-        """
+        """Run one Whisper pass and eagerly consume the lazy segment generator."""
         segments, info = model.transcribe(
             audio,
             beam_size=3,
@@ -118,10 +114,11 @@ class LocalSTT:
     ):
         """Record one natural conversational turn.
 
-        The thresholds are intentionally permissive for consumer microphones.
-        Whisper performs its own VAD afterwards, so it is safer to retain quiet
-        speech than to discard it here. Diagnostic RMS values are kept for the
-        desktop runtime so microphone-level problems are visible immediately.
+        Use the same RawInputStream/int16 path as the wake-word listener. Some
+        Windows USB audio drivers can deliver valid data to a raw int16 stream
+        while returning zeros when the same endpoint is reopened as float32.
+        Converting the proven-good int16 PCM ourselves keeps wake and STT on an
+        identical capture path.
         """
         import numpy as np
         import sounddevice as sd
@@ -143,12 +140,22 @@ class LocalSTT:
         heard_speech = False
         recording: list[Any] = []
 
-        with sd.InputStream(samplerate=sample_rate, channels=1, dtype="float32") as stream:
+        stream_kwargs: dict[str, Any] = {
+            "samplerate": sample_rate,
+            "channels": 1,
+            "dtype": "int16",
+            "blocksize": chunk,
+        }
+        if self.input_device not in (None, ""):
+            stream_kwargs["device"] = self.input_device
+
+        with sd.RawInputStream(**stream_kwargs) as stream:
             for index in range(max_chunks):
                 if self.abort_event.is_set():
                     break
                 data, _overflowed = stream.read(chunk)
-                flat = data.reshape(-1).copy()
+                pcm = np.frombuffer(data, dtype=np.int16).copy()
+                flat = pcm.astype(np.float32) / 32768.0
                 recording.append(flat)
                 rms = float(np.sqrt(np.mean(np.square(flat)))) if flat.size else 0.0
                 self.last_recording_max_rms = max(self.last_recording_max_rms, rms)
