@@ -77,32 +77,40 @@ class JarvisOrchestrator:
     def start_session(self, *, local_time: str = "", locale: str = "it-IT") -> str:
         """Let the AI open a voice session naturally instead of reading a fixed script.
 
-        The opening is appended as an assistant turn, so a reply such as "bene" or
-        "purtroppo sì" is interpreted as a continuation of the greeting rather than
-        as an isolated command.
+        The cloud request includes a synthetic user-side session event because some
+        OpenAI-compatible providers reject conversations containing only system turns.
+        The event itself is not persisted as something the human said; only JARVIS's
+        generated opening is appended to the real conversation history.
         """
         self.set_state(JarvisState.THINKING)
         time_context = local_time.strip() or "ora locale non disponibile"
         opening_instruction = (
-            "La sessione vocale con l'utente è appena iniziata. Apri tu la conversazione "
-            "in modo spontaneo e naturale, come una presenza intelligente già attiva nella stanza. "
+            "Evento di avvio della sessione vocale. L'utente ha appena aperto JARVIS e non ha "
+            "ancora pronunciato nulla. Apri tu la conversazione in modo spontaneo e naturale, "
+            "come una presenza intelligente già attiva nella stanza. "
             f"Ora/data locale comunicata dal dispositivo: {time_context}. Locale: {locale or 'it-IT'}. "
             "Non dire che sei un'IA, non descrivere il sistema e non elencare capacità. "
-            "Non usare una frase standard o sempre identica. Scegli una sola apertura breve: "
-            "un saluto coerente con il momento della giornata e, quando naturale, una semplice "
-            "domanda o osservazione per avviare il dialogo. Mantieni il tono JARVIS: composto, "
-            "elegante, discreto e umano nel ritmo. Rivolgiti all'utente come 'signore' solo se suona naturale."
+            "Non usare una frase standard o sempre identica. Produci una sola apertura breve, "
+            "coerente con il momento della giornata e con il tono della conversazione vocale. "
+            "Puoi aggiungere una semplice domanda o osservazione se rende l'apertura più naturale. "
+            "Mantieni il tono JARVIS: composto, elegante, discreto e umano nel ritmo. "
+            "Rivolgiti all'utente come 'signore' soltanto quando suona naturale. "
+            "Rispondi esclusivamente con ciò che JARVIS deve pronunciare ad alta voce."
         )
         try:
+            request_messages = [
+                *self.messages,
+                {"role": "user", "content": opening_instruction},
+            ]
             assistant_message = self.client.chat_completion(
                 model=self.model,
-                messages=[*self.messages, {"role": "system", "content": opening_instruction}],
+                messages=request_messages,
                 tools=None,
-                temperature=0.78,
+                temperature=0.72,
             )
             content = str(assistant_message.get("content") or "").strip()
             if not content:
-                content = "Buongiorno, signore. Come va questa mattina?"
+                raise RuntimeError("Il modello cloud non ha generato l'apertura della sessione.")
             self.messages.append({"role": "assistant", "content": content})
             self.set_state(JarvisState.SPEAKING)
             return content
