@@ -5,16 +5,30 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$condaCommand = Get-Command conda -ErrorAction SilentlyContinue
-if (-not $condaCommand) {
-    throw "Conda non trovato. Esegui prima setup-cosyvoice.ps1."
+function Find-CondaExe {
+    $command = Get-Command conda -ErrorAction SilentlyContinue
+    if ($command -and $command.Source) {
+        return $command.Source
+    }
+
+    $candidates = @(
+        (Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:LOCALAPPDATA "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe"),
+        (Join-Path $env:LOCALAPPDATA "anaconda3\Scripts\conda.exe"),
+        (Join-Path $env:ProgramData "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:ProgramData "anaconda3\Scripts\conda.exe")
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    if ($candidates.Count -gt 0) {
+        return $candidates[0]
+    }
+
+    throw "Conda non trovato. Esegui prima setup-cosyvoice.ps1 o verifica l'installazione di Miniconda."
 }
 
-$condaBase = (& conda info --base).Trim()
-$condaExe = Join-Path $condaBase "Scripts\conda.exe"
-if (-not (Test-Path $condaExe)) {
-    $condaExe = $condaCommand.Source
-}
+$condaExe = Find-CondaExe
+Write-Host "Conda rilevato: $condaExe" -ForegroundColor Green
 
 $cosyRepo = Join-Path $PSScriptRoot ".local\cosyvoice\CosyVoice"
 $modelDir = Join-Path $PSScriptRoot ".local\cosyvoice\models\Fun-CosyVoice3-0.5B"
