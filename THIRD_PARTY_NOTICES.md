@@ -6,13 +6,13 @@ This project includes original code and architecture informed by publicly availa
 
 Repository: `https://github.com/QwenAudio/CosyVoice`
 
-Model used by the local voice setup: `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`
+Model used by the voice setup: `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`
 
 License: Apache License 2.0 for the upstream repository and the referenced Hugging Face model metadata.
 
-JARVIS does not vendor the CosyVoice source tree or model weights. `setup-cosyvoice.ps1` creates a separate local Conda environment, clones the upstream repository into the ignored `.local/` directory, and downloads the model into an ignored local model directory. The private reference voice remains under the ignored `private/` directory and is never intended to be committed to GitHub.
+JARVIS does not vendor the CosyVoice source tree or model weights. On Emergent, `scripts/setup-cosyvoice-emergent.sh` creates a separate runtime under the ignored `/app/.local/cosyvoice/` path, clones the upstream repository, downloads the model, and registers the voice worker with Supervisor when available. A Windows/local setup helper may also be kept for development, but the deployed JARVIS voice path targets the Emergent worker.
 
-JARVIS uses CosyVoice zero-shot voice cloning and streaming inference. The reference speaker representation is prepared once when the local voice service starts, then reused for subsequent utterances to reduce latency.
+The private reference voice remains under the ignored `/app/private/voices/` directory and is never intended to be committed to GitHub. JARVIS uses CosyVoice zero-shot voice cloning and streaming inference. The reference speaker representation is prepared once when the voice worker starts, then reused for subsequent utterances. The worker also performs one warm-up synthesis before reporting ready so the first real reply does not pay the full lazy initialization cost.
 
 ## PanPenek/JarvisAi
 
@@ -28,4 +28,4 @@ Repository: `https://github.com/fishaudio/fish-speech`
 
 License: Fish Audio Research License. See the upstream repository/model for the current terms.
 
-A legacy adapter remains in the codebase for explicit `JARVIS_TTS_MODE=cloud` configurations, but the default JARVIS voice path is local CosyVoice and does not call Fish Audio.
+A legacy adapter remains in the codebase for explicit `JARVIS_TTS_MODE=cloud` configurations, but the default JARVIS voice path is CosyVoice and does not call Fish Audio.
