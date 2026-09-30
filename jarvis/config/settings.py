@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     stt_compute_type: str = "int8"
     stt_language: str = "it"
 
+    # Browser/cloud voice preview. Fish Audio runs remotely on a public
+    # Hugging Face ZeroGPU Space, so no local GPU/model is required.
+    cloud_tts_enabled: bool = True
+    cloud_tts_provider: str = "fish-s2-pro"
+    fish_s2_space: str = "artificialguybr/fish-s2-pro-zero"
+    fish_s2_hf_token: str = ""
+    fish_s2_style_prompt: str = "[low voice] [calm professional tone]"
+
+    # Local desktop TTS remains available for the future native runtime.
     tts_enabled: bool = True
     tts_voice: str = "im_nicola"
     tts_speed: float = 1.05
