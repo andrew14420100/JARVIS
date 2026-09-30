@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from jarvis.agent.orchestrator import JarvisOrchestrator
@@ -18,9 +19,12 @@ settings = get_settings()
 client = LMStudioClient(settings.lm_studio_base_url, settings.request_timeout_seconds)
 registry = build_default_registry()
 orchestrator: JarvisOrchestrator | None = None
-WEB_DIR = Path(__file__).parent / "web"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LEGACY_WEB_DIR = Path(__file__).parent / "web"
+FRONTEND_BUILD_DIR = REPO_ROOT / "frontend" / "build"
+FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
 
-app = FastAPI(title="JARVIS", version="0.3.0")
+app = FastAPI(title="JARVIS", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,6 +32,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# The local Windows runtime serves the exact React/WebGL UI used by Emergent.
+# The cloud preview can still run frontend/backend as separate services.
+if FRONTEND_STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=FRONTEND_STATIC_DIR), name="frontend-static")
 
 
 class ChatRequest(BaseModel):
@@ -47,9 +56,16 @@ def get_orchestrator() -> JarvisOrchestrator:
     return orchestrator
 
 
+def _frontend_index() -> Path:
+    built = FRONTEND_BUILD_DIR / "index.html"
+    if built.is_file():
+        return built
+    return LEGACY_WEB_DIR / "index.html"
+
+
 @app.get("/")
 def home() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(_frontend_index())
 
 
 @app.get("/api/health")
@@ -136,3 +152,27 @@ def reset() -> dict[str, bool]:
     if orchestrator is not None:
         orchestrator.reset_conversation()
     return {"ok": True}
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def react_spa(path: str) -> FileResponse:
+    """Serve root-level React build assets and SPA routes on the local runtime."""
+    if path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API route not found")
+
+    if FRONTEND_BUILD_DIR.is_dir():
+        candidate = (FRONTEND_BUILD_DIR / path).resolve()
+        try:
+            candidate.relative_to(FRONTEND_BUILD_DIR.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Not found") from exc
+        if candidate.is_file():
+            return FileResponse(candidate)
+        index = FRONTEND_BUILD_DIR / "index.html"
+        if index.is_file():
+            return FileResponse(index)
+
+    legacy = LEGACY_WEB_DIR / "index.html"
+    if legacy.is_file():
+        return FileResponse(legacy)
+    raise HTTPException(status_code=404, detail="Frontend not built")
