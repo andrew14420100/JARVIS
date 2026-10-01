@@ -1,0 +1,21 @@
+name: Export JARVIS ZIP
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Create source zip
+        run: |
+          zip -r JARVIS-main.zip . -x '.git/*' 'JARVIS-main.zip'
+      - name: Upload source zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-main
+          path: JARVIS-main.zip
+          if-no-files-found: error
