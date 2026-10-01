@@ -11,6 +11,109 @@ from .echo import echo_reference
 class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
     """CosyVoice client that degrades to ordinary streaming instead of silence."""
 
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8765",
+        timeout_seconds: float = 120.0,
+        output_device: str | int | None = None,
+    ) -> None:
+        super().__init__(base_url=base_url, timeout_seconds=timeout_seconds)
+        self.output_device = output_device
+        self._selected_output_device: int | None = None
+
+    def _candidate_output_devices(self, sd) -> list[int]:
+        devices = list(sd.query_devices())
+        output_indexes = [
+            index for index, info in enumerate(devices)
+            if int(info.get("max_output_channels", 0) or 0) > 0
+        ]
+        ordered: list[int] = []
+
+        def add(index: int | None) -> None:
+            if index is None:
+                return
+            if index in output_indexes and index not in ordered:
+                ordered.append(index)
+
+        configured = self.output_device
+        if configured not in (None, ""):
+            if isinstance(configured, int) or (isinstance(configured, str) and configured.strip().isdigit()):
+                add(int(configured))
+            else:
+                wanted = str(configured).casefold().strip()
+                for index in output_indexes:
+                    name = str(devices[index].get("name", "")).casefold().strip()
+                    if name == wanted:
+                        add(index)
+                for index in output_indexes:
+                    name = str(devices[index].get("name", "")).casefold()
+                    if wanted and wanted in name:
+                        add(index)
+
+        try:
+            default_device = sd.default.device
+            default_output = int(default_device[1] if isinstance(default_device, (tuple, list)) else default_device)
+            if default_output >= 0:
+                add(default_output)
+        except Exception:
+            pass
+
+        for index in output_indexes:
+            add(index)
+        return ordered
+
+    def _select_working_output_device(self, sd) -> int | None:
+        if self._selected_output_device is not None:
+            return self._selected_output_device
+
+        for index in self._candidate_output_devices(sd):
+            try:
+                info = sd.query_devices(index, "output")
+                stream = sd.RawOutputStream(
+                    device=index,
+                    samplerate=self._sample_rate,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=0,
+                    latency="low",
+                )
+                try:
+                    stream.start()
+                finally:
+                    try:
+                        stream.stop()
+                    except Exception:
+                        pass
+                    stream.close()
+                self._selected_output_device = index
+                print(
+                    f"[JARVIS] Uscita voce: [{index}] {info.get('name', f'device {index}')} · "
+                    f"{float(info.get('default_samplerate', self._sample_rate)):.0f} Hz"
+                )
+                return index
+            except Exception as exc:
+                try:
+                    name = str(sd.query_devices(index).get("name", f"device {index}"))
+                except Exception:
+                    name = f"device {index}"
+                print(f"[AUDIO] Scarto output [{index}] {name}: {exc}")
+
+        raise RuntimeError("Nessuna uscita audio PortAudio disponibile per CosyVoice.")
+
+    def prepare_output(self) -> dict[str, object]:
+        import sounddevice as sd
+
+        index = self._select_working_output_device(sd)
+        if index is None:
+            return {"ready": False, "device": None, "name": ""}
+        info = sd.query_devices(index, "output")
+        return {
+            "ready": True,
+            "device": index,
+            "name": str(info.get("name", f"device {index}")),
+            "sample_rate": int(self._sample_rate),
+        }
+
     def _play_pcm_iterator(self, pcm_chunks: Iterator[bytes], *, label: str) -> None:
         """Play PCM while retaining a short in-memory echo reference."""
         import sounddevice as sd
@@ -22,7 +125,9 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
         total_bytes = 0
         echo_reference.clear()
         try:
+            output_device = self._select_working_output_device(sd)
             stream = sd.RawOutputStream(
+                device=output_device,
                 samplerate=self._sample_rate,
                 channels=1,
                 dtype="int16",
