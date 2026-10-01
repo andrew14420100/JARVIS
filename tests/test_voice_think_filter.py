@@ -22,10 +22,9 @@ def test_split_think_tags_are_not_spoken() -> None:
     assert result == "Buongiorno, signore."
 
 
-def test_orphan_closing_tag_discards_hidden_prefix() -> None:
+def test_orphan_closing_tag_discards_prefix_in_same_unflushed_packet() -> None:
     result = collect(
-        "ragionamento iniziato prima dello stream",
-        "</think>Risposta finale.",
+        "ragionamento iniziato prima dello stream</think>Risposta finale."
     )
     assert result == "Risposta finale."
 
@@ -40,3 +39,10 @@ def test_non_stream_cleanup_removes_reasoning_body() -> None:
         "<think>think think think</think>Testo da leggere."
     )
     assert result == "Testo da leggere."
+
+
+def test_non_stream_cleanup_handles_orphan_closing_tag() -> None:
+    result = CosyVoiceProxyTTS._clean_for_speech(
+        "ragionamento non destinato alla voce</think>Risposta finale."
+    )
+    assert result == "Risposta finale."
