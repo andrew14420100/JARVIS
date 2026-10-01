@@ -26,14 +26,7 @@ class CloudProvider:
 
 
 class CloudAIClient:
-    """OpenAI-compatible cloud client restricted to explicitly free routes.
-
-    Normal cloud priority is deterministic:
-    NVIDIA Nemotron 3 Ultra -> Z.AI free GLM -> Groq Free -> OpenRouter Free.
-
-    Simple conversational turns can be streamed token-by-token. Tool-bearing
-    turns keep the complete-response path so actions remain deterministic.
-    """
+    """Free cloud priority with a fully streaming local LM Studio fallback."""
 
     NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
     ZAI_BASE_URL = "https://api.z.ai/api/paas/v4"
@@ -60,7 +53,8 @@ class CloudAIClient:
         local_fallback_enabled: bool = False,
         local_fallback_base_url: str = "http://127.0.0.1:1234/v1",
     ) -> None:
-        self._client = httpx.Client(timeout=timeout_seconds)
+        timeout = httpx.Timeout(timeout_seconds, connect=min(8.0, timeout_seconds))
+        self._client = httpx.Client(timeout=timeout)
         self.providers: list[CloudProvider] = []
         self.last_provider = ""
         self.last_model = ""
@@ -150,27 +144,45 @@ class CloudAIClient:
             **provider.extra_headers,
         }
 
-    def _configured_or_raise(self) -> list[CloudProvider]:
-        if not self.providers:
+    def _has_any_brain(self) -> bool:
+        return bool(self.providers) or self._local_fallback is not None
+
+    def _ensure_any_brain(self) -> None:
+        if not self._has_any_brain():
             raise CloudAIError(
-                "Nessun provider cloud gratuito configurato. Imposta JARVIS_NVIDIA_API_KEY, "
-                "JARVIS_ZAI_API_KEY, JARVIS_GROQ_API_KEY e/o JARVIS_OPENROUTER_API_KEY."
+                "Nessun cervello AI configurato. Imposta almeno un provider gratuito "
+                "oppure abilita il fallback LM Studio locale."
             )
-        return self.providers
 
     def list_models(self) -> list[str]:
-        return [provider.model for provider in self._configured_or_raise()]
+        models = [provider.model for provider in self.providers]
+        if not models and self._local_fallback is not None:
+            try:
+                models.extend(self._local_fallback.list_models())
+            except LMStudioError as exc:
+                self.last_error = f"lmstudio-local-fallback: {exc}"
+        if not models:
+            self._ensure_any_brain()
+        return models
 
     def resolve_model(self, configured_model: str = "") -> str:
-        providers = self._configured_or_raise()
-        if configured_model.strip():
-            allowed = {provider.model for provider in providers}
-            if configured_model.strip() not in allowed:
-                raise CloudAIError(
-                    "Il modello configurato non appartiene alla whitelist gratuita di JARVIS."
-                )
-            return configured_model.strip()
-        return providers[0].model
+        configured = configured_model.strip()
+        if configured:
+            cloud_allowed = {provider.model for provider in self.providers}
+            if configured in cloud_allowed:
+                return configured
+            if self._local_fallback is not None:
+                local_models = self._local_fallback.list_models()
+                if configured in local_models:
+                    return configured
+            raise CloudAIError("Il modello configurato non è disponibile nei cervelli abilitati.")
+
+        if self.providers:
+            return self.providers[0].model
+        if self._local_fallback is not None:
+            return self._local_fallback.resolve_model("")
+        self._ensure_any_brain()
+        raise CloudAIError("Nessun modello disponibile.")
 
     @staticmethod
     def _latest_user_text(messages: list[dict[str, Any]]) -> str:
@@ -228,7 +240,7 @@ class CloudAIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> bool:
-        return bool(self.providers) and not self._should_offer_tools(messages, tools)
+        return self._has_any_brain() and not self._should_offer_tools(messages, tools)
 
     def _payload(
         self,
@@ -302,12 +314,13 @@ class CloudAIClient:
             response.raise_for_status()
             for raw_line in response.iter_lines():
                 line = raw_line.strip()
-                if not line or not line.startswith("data:"):
+                if not line:
                     continue
-                payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if not line or line == "[DONE]":
                     break
-                data = json.loads(payload)
+                data = json.loads(line)
                 choices = data.get("choices") or []
                 if not choices:
                     continue
@@ -339,6 +352,29 @@ class CloudAIClient:
         self.last_model = local_model
         return message
 
+    def _stream_local_fallback(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+    ) -> Iterator[str]:
+        if self._local_fallback is None:
+            raise LMStudioError("Fallback locale LM Studio disabilitato.")
+        local_model = self._local_fallback.resolve_model("")
+        emitted = False
+        for chunk in self._local_fallback.chat_completion_stream(
+            model=local_model,
+            messages=messages,
+            temperature=temperature,
+        ):
+            if not emitted:
+                self.last_provider = "lmstudio-local-fallback"
+                self.last_model = local_model
+            emitted = True
+            yield chunk
+        if not emitted:
+            raise LMStudioError("Fallback locale LM Studio senza output streaming.")
+
     def chat_completion_stream(
         self,
         *,
@@ -347,11 +383,11 @@ class CloudAIClient:
         temperature: float = 0.4,
     ) -> Iterator[str]:
         del model
-        providers = self._configured_or_raise()
+        self._ensure_any_brain()
         errors: list[str] = []
         local_tried = False
 
-        for provider in providers:
+        for provider in self.providers:
             emitted = False
             try:
                 for chunk in self._stream_provider(
@@ -373,34 +409,26 @@ class CloudAIClient:
                     raise CloudAIError(self.last_error) from exc
                 errors.append(f"{provider.name}: {exc}")
 
-            if provider.name == "nvidia-free" and self._local_fallback_enabled:
+            if provider.name == "nvidia-free" and self._local_fallback is not None:
                 local_tried = True
                 try:
-                    message = self._request_local_fallback(
+                    yield from self._stream_local_fallback(
                         messages=messages,
-                        selected_tools=None,
                         temperature=temperature,
                     )
-                    content = str(message.get("content") or "")
-                    if content:
-                        self.last_error = " | ".join(errors)
-                        yield content
-                        return
+                    self.last_error = " | ".join(errors)
+                    return
                 except (LMStudioError, ValueError, KeyError, IndexError) as exc:
                     errors.append(f"lmstudio-local-fallback: {exc}")
 
-        if self._local_fallback_enabled and not local_tried:
+        if self._local_fallback is not None and not local_tried:
             try:
-                message = self._request_local_fallback(
+                yield from self._stream_local_fallback(
                     messages=messages,
-                    selected_tools=None,
                     temperature=temperature,
                 )
-                content = str(message.get("content") or "")
-                if content:
-                    self.last_error = " | ".join(errors)
-                    yield content
-                    return
+                self.last_error = " | ".join(errors)
+                return
             except (LMStudioError, ValueError, KeyError, IndexError) as exc:
                 errors.append(f"lmstudio-local-fallback: {exc}")
 
@@ -419,13 +447,13 @@ class CloudAIClient:
         temperature: float = 0.4,
     ) -> dict[str, Any]:
         del model
-        providers = self._configured_or_raise()
+        self._ensure_any_brain()
         errors: list[str] = []
         selected_tools = tools if self._should_offer_tools(messages, tools) else None
 
         start_index = 0
-        if providers and providers[0].name == "nvidia-free":
-            nvidia = providers[0]
+        if self.providers and self.providers[0].name == "nvidia-free":
+            nvidia = self.providers[0]
             try:
                 message = self._request_provider(
                     nvidia,
@@ -441,7 +469,7 @@ class CloudAIClient:
                 errors.append(f"{nvidia.name}: {exc}")
                 start_index = 1
 
-            if self._local_fallback_enabled:
+            if self._local_fallback is not None:
                 try:
                     message = self._request_local_fallback(
                         messages=messages,
@@ -453,7 +481,7 @@ class CloudAIClient:
                 except (LMStudioError, ValueError, KeyError, IndexError) as exc:
                     errors.append(f"lmstudio-local-fallback: {exc}")
 
-        for provider in providers[start_index:]:
+        for provider in self.providers[start_index:]:
             try:
                 message = self._request_provider(
                     provider,
@@ -468,7 +496,7 @@ class CloudAIClient:
             except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
                 errors.append(f"{provider.name}: {exc}")
 
-        if self._local_fallback_enabled and start_index == 0:
+        if self._local_fallback is not None and start_index == 0:
             try:
                 message = self._request_local_fallback(
                     messages=messages,
@@ -488,15 +516,15 @@ class CloudAIClient:
 
     def status(self) -> dict[str, object]:
         configured = [provider.name for provider in self.providers]
-        if self._local_fallback_enabled:
+        if self._local_fallback is not None:
             configured.append("lmstudio-local-fallback")
         return {
-            "mode": "cloud-free-with-local-fallback" if self._local_fallback_enabled else "cloud-free",
+            "mode": "cloud-free-with-local-fallback" if self._local_fallback is not None else "cloud-free",
             "configured": configured,
             "models": [provider.model for provider in self.providers],
             "active_provider": self.last_provider,
             "active_model": self.last_model,
             "last_error": self.last_error,
-            "local_fallback_enabled": self._local_fallback_enabled,
+            "local_fallback_enabled": self._local_fallback is not None,
             "paid_fallback": False,
         }
