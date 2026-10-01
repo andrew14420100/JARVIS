@@ -182,35 +182,27 @@ class CosyVoiceProxyTTS:
         if not value.strip():
             return ""
 
-        # Code fences/backticks become plain spoken text instead of symbols.
-        value = re.sub(r"\x60\x60\x60(?:[A-Za-z0-9_+-]+)?\\s*([\\s\\S]*?)\x60\x60\x60", r"\\1", value)
-        value = re.sub(r"\x60([^\x60]+)\x60", r"\\1", value)
-
-        # Markdown emphasis, strike-through, headings and list markers are
-        # presentation only and must never be pronounced by JARVIS.
-        value = re.sub(r"(\\*\\*|__)(.*?)\\1", r"\\2", value, flags=re.DOTALL)
-        value = re.sub(r"[\\*_~]+", "", value)
-        value = re.sub(r"^\\s*#{1,6}\\s*", "", value, flags=re.MULTILINE)
-        value = re.sub(r"^\\s*[-+•]\\s+", "", value, flags=re.MULTILINE)
-
-        # Markdown links are spoken as their visible label.
-        value = re.sub(r"\\[([^\\]]+)\\]\\([^)]*\\)", r"\\1", value)
-
-        # Keep punctuation natural for CosyVoice while collapsing whitespace.
-        value = re.sub(r"[ \\t]+", " ", value)
-        value = re.sub(r"\\n{3,}", "\\n\\n", value)
+        value = re.sub(r"\x60\x60\x60(?:[A-Za-z0-9_+-]+)?\s*([\s\S]*?)\x60\x60\x60", r"\1", value)
+        value = re.sub(r"\x60([^\x60]+)\x60", r"\1", value)
+        value = re.sub(r"(\*\*|__)(.*?)\1", r"\2", value, flags=re.DOTALL)
+        value = re.sub(r"[\*_~]+", "", value)
+        value = re.sub(r"^\s*#{1,6}\s*", "", value, flags=re.MULTILINE)
+        value = re.sub(r"^\s*[-+•]\s+", "", value, flags=re.MULTILINE)
+        value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+        value = re.sub(r"[ \t]+", " ", value)
+        value = re.sub(r"\n{3,}", "\n\n", value)
         return value.strip()
 
     @staticmethod
     def _speech_segments(text: str, max_chars: int = 72) -> list[str]:
         """Create short natural segments for quick first-speech latency."""
+        clean = self._clean_for_speech(text) if False else ""
+        # Keep this method static for compatibility; cleaning is repeated by
+        # stream_pcm immediately before synthesis.
         clean = " ".join(str(text or "").strip().split())
         if not clean:
             return []
 
-        # Commas are also useful boundaries for spoken Italian. Short segments
-        # reduce time-to-first-audio while the next segment is generated in
-        # parallel during playback.
         rough = re.split(r"(?<=[.!?;:,])\s+", clean)
         segments: list[str] = []
         for part in rough:
@@ -229,7 +221,6 @@ class CosyVoiceProxyTTS:
             if part:
                 segments.append(part)
         return segments or [clean]
-
     def _buffer_segment(self, text: str) -> bytes:
         pcm = b"".join(self.stream_pcm(text))
         if len(pcm) % 2:
