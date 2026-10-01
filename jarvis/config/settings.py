@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     )
     vision_model_priority: str = "LGAI-EXAONE/EXAONE-4.5-33B"
 
+    # JARVIS-Core: one identity, many specialist brains. The router selects only
+    # models already exposed by the local server. Difficult turns may use a
+    # second already-available model as a silent advisor before the final answer.
+    core_router_enabled: bool = True
+    core_consensus_enabled: bool = True
+    core_consensus_min_complexity: int = 3
+    core_advisor_max_chars: int = 1400
+
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
     openjarvis_model: str = ""
