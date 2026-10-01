@@ -20,8 +20,8 @@ from jarvis.voice.identity import SpeakerAuthenticator, SpeakerMatch
 from jarvis.voice.prosody import analyze_prosody
 
 
-ACOUSTIC_GUARD_SECONDS = 0.24
-POST_WAKE_CAPTURE_DELAY_SECONDS = 0.28
+ACOUSTIC_GUARD_SECONDS = 0.10
+POST_WAKE_CAPTURE_DELAY_SECONDS = 0.12
 
 
 @dataclass(slots=True)
@@ -128,6 +128,12 @@ def main() -> None:
     tts_ready = bool(tts.available())
     if not tts_ready:
         print("[JARVIS] Voce non pronta: continuo senza TTS finché CosyVoice non torna disponibile.")
+    elif hasattr(tts, "prepare_output"):
+        try:
+            tts.prepare_output()
+        except Exception as exc:
+            print(f"[JARVIS] Uscita voce non pronta: {exc}")
+            tts_ready = False
 
     try:
         print("[STT] Precarico Whisper...")
@@ -166,12 +172,21 @@ def main() -> None:
         agent.set_state(JarvisState.IDLE)
 
     def request_barge_in() -> None:
-        if settings.listener_barge_in_enabled and session_active.is_set():
+        if (
+            settings.listener_barge_in_enabled
+            and session_active.is_set()
+            and agent.state == JarvisState.SPEAKING
+        ):
             stop_current_turn(barge_in=True)
 
     def verify_barge_speaker(candidate_audio) -> bool:
-        if not settings.speaker_auth_enabled or not speakers.has_profiles():
+        if not settings.speaker_auth_enabled:
             return True
+        # On the very first session there is no trustworthy voiceprint yet.
+        # Do not allow ambient sound or JARVIS' own cloned voice to interrupt
+        # playback until the owner has been enrolled from a complete turn.
+        if not speakers.has_profiles():
+            return False
         match = speakers.identify(candidate_audio, 16000)
         if match.authorized:
             print(f"[VOICE-ID] barge-in={match.name} role={match.role} score={match.score:.2f}")
@@ -273,8 +288,6 @@ def main() -> None:
         turn = capture_with_wake_paused(**kwargs)
         if turn is None or not turn.authorized or not turn.text:
             return turn
-        # If Whisper returns a phrase that is grammatically hanging, offer a
-        # longer pause once instead of cutting a human hesitation in half.
         if _looks_incomplete(turn.text):
             continuation = capture_with_wake_paused(
                 initial_silence_seconds=settings.stt_incomplete_phrase_silence_seconds,
@@ -297,7 +310,8 @@ def main() -> None:
             tts.speak(text, streamed=True)
             acoustic_guard()
         except Exception as exc:
-            print(f"[JARVIS] TTS non disponibile: {exc}")
+            if not barge_in_requested.is_set():
+                print(f"[JARVIS] TTS non disponibile: {exc}")
 
     def speak_error(reason: object) -> str:
         phrase = str(settings.listener_error_phrase or "").strip() or "Mi dispiace signore, non ho capito l'ultima parte."
@@ -354,7 +368,8 @@ def main() -> None:
                 for _ in brain_chunks():
                     pass
         except Exception as exc:
-            print(f"[JARVIS] Stream risposta non disponibile: {exc}")
+            if not barge_in_requested.is_set():
+                print(f"[JARVIS] Stream risposta non disponibile: {exc}")
 
         reply = "".join(collected).strip()
         if brain_done_at is None:
@@ -394,7 +409,7 @@ def main() -> None:
         if continued:
             print(f"[JARVIS] Frase dopo attivazione · peak={peak:.4f} noise={noise:.4f} soglia={threshold:.4f}")
             turn = capture_natural_turn(
-                initial_silence_seconds=0.85,
+                initial_silence_seconds=0.75,
                 max_seconds=min(settings.listener_max_utterance_seconds, 18.0),
                 activation_audio=post_audio,
                 activation_has_speech=True,
@@ -409,14 +424,14 @@ def main() -> None:
         )
 
     def capture_after_barge_in() -> CapturedTurn | None:
-        time.sleep(0.12)
+        time.sleep(0.08)
         try:
             buffered = wake.post_wake_audio(seconds=1.05, exclude_head_seconds=0.0)
         except Exception:
             buffered = None
         continued, _peak, _noise, _threshold = _post_wake_speech_profile(buffered)
         return capture_natural_turn(
-            initial_silence_seconds=1.4,
+            initial_silence_seconds=1.1,
             max_seconds=min(settings.listener_max_utterance_seconds, 20.0),
             activation_audio=buffered,
             activation_has_speech=continued,
@@ -544,7 +559,7 @@ def main() -> None:
     try:
         wake.run(
             handle_wake,
-            busy=busy.is_set,
+            busy=lambda: busy.is_set() and agent.state == JarvisState.SPEAKING,
             interrupt=request_barge_in if settings.listener_barge_in_enabled else None,
             conversation_active=session_active.is_set,
             speech_interrupt=verify_barge_speaker if settings.listener_barge_in_enabled else None,
