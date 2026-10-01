@@ -18,21 +18,8 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Compile backend entrypoint
-        run: >-
-          python -m py_compile
-          backend/server.py
-          jarvis/app.py
-          jarvis/desktop.py
-          jarvis/desktop_stable.py
-          jarvis/agent/orchestrator.py
-          jarvis/agent/stable_orchestrator.py
-          jarvis/brain/lmstudio.py
-          jarvis/brain/cloud.py
-          jarvis/voice/stt_stable.py
-          jarvis/voice/wake_stable.py
-          jarvis/voice/cosyvoice_stable.py
-          jarvis/voice/conversation.py
+      - name: Compile all Python sources
+        run: python -m compileall -q jarvis backend local_voice
       - name: Run tests
         run: pytest -q
 
