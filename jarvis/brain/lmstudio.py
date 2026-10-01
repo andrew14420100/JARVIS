@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 import json
 import re
+import time
 from typing import Any
 
 import httpx
@@ -31,6 +32,19 @@ class LMStudioClient:
         "architettura", "analizza", "analisi", "ottimizza", "progetta",
         "pianifica", "confronta", "ricerca", "investiga", "diagnostica",
         "github", "deploy", "backend", "frontend", "database", "api",
+    )
+    _MEMORY_MARKERS = (
+        "ricordi", "ricordo", "ricordati", "ti ho detto", "avevo detto",
+        "cosa ti ho detto", "prima", "ieri", "ultima volta", "tempo fa",
+        "settimana scorsa", "mese scorso",
+    )
+    _FAST_SYSTEM_PROMPT = (
+        "Sei JARVIS. Conversazione vocale italiana in tempo reale. "
+        "Rispondi come una presenza umana, calma, intelligente e naturale, non come un chatbot. "
+        "Per saluti e domande semplici usa una sola frase breve; se bastano poche parole, usale. "
+        "Rivolgiti all'utente come 'signore' solo quando suona naturale. "
+        "Niente markdown, elenchi, spiegazioni sull'architettura, formule di cortesia ripetitive o report tecnici non richiesti. "
+        "Mantieni il filo dei turni recenti e reagisci direttamente a ciò che l'utente ha appena detto."
     )
 
     def __init__(self, base_url: str, timeout_seconds: float = 120.0) -> None:
@@ -113,7 +127,38 @@ class LMStudioClient:
         words = text.split()
         if len(words) > 32:
             return False
-        return not any(marker in text for marker in cls._DEEP_MARKERS)
+        if any(marker in text for marker in cls._DEEP_MARKERS):
+            return False
+        # Long-term-memory questions keep the full context path. Ordinary
+        # continuity such as "e poi?" still uses the compact recent transcript.
+        if any(marker in text for marker in cls._MEMORY_MARKERS):
+            return False
+        return True
+
+    @classmethod
+    def _compact_realtime_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Minimize prefill for ordinary speech without touching stored history.
+
+        The full JARVIS prompt is intentionally rich for tools and complex work,
+        but sending it for "come stai?" wastes most of the first-token budget.
+        For a simple voice turn keep a compact identity prompt plus only the last
+        few actual dialogue turns. Persistent memory remains stored unchanged and
+        is used again automatically on non-fast/memory-sensitive turns.
+        """
+        dialogue: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "")
+            content = message.get("content")
+            if role not in {"user", "assistant"} or not isinstance(content, str):
+                continue
+            text = content.strip()
+            if text:
+                dialogue.append({"role": role, "content": text[-1200:]})
+
+        # Six messages = roughly the last three exchanges, enough for natural
+        # local continuity while keeping prompt prefill small and predictable.
+        dialogue = dialogue[-6:]
+        return [{"role": "system", "content": cls._FAST_SYSTEM_PROMPT}, *dialogue]
 
     @classmethod
     def _prepare_messages_for_latency(
@@ -123,13 +168,15 @@ class LMStudioClient:
         tools: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         fast = cls._is_fast_voice_turn(messages, tools)
+        prepared = cls._compact_realtime_messages(messages) if fast else messages
+
         if not fast or "qwen" not in cls._normalize_model_name(model):
-            return messages, fast
+            return prepared, fast
 
         # Qwen's soft switch disables long hidden reasoning for the current turn.
-        # Work on a shallow copy so the permanent conversation transcript remains
-        # clean and never stores the control token.
-        prepared = [dict(message) for message in messages]
+        # Work on a copy so the permanent conversation transcript never stores
+        # the control token.
+        prepared = [dict(message) for message in prepared]
         for index in range(len(prepared) - 1, -1, -1):
             if prepared[index].get("role") != "user":
                 continue
@@ -184,9 +231,15 @@ class LMStudioClient:
             "stream": True,
         }
         if fast_turn:
-            payload["max_tokens"] = 220
+            payload["max_tokens"] = 160
 
+        prompt_chars = sum(
+            len(str(message.get("content") or ""))
+            for message in prepared_messages
+        )
+        started = time.monotonic()
         produced = False
+        first_token_logged = False
         try:
             with self._client.stream(
                 "POST",
@@ -212,6 +265,12 @@ class LMStudioClient:
                     delta = choices[0].get("delta") or {}
                     text = self._content_from_delta(delta)
                     if text:
+                        if not first_token_logged:
+                            first_token_logged = True
+                            print(
+                                f"[AI] model={model} · fast={int(fast_turn)} · "
+                                f"prompt_chars={prompt_chars} · primo_token={time.monotonic() - started:.2f}s"
+                            )
                         produced = True
                         yield text
             if not produced:
@@ -238,7 +297,7 @@ class LMStudioClient:
             "temperature": temperature,
         }
         if fast_turn:
-            payload["max_tokens"] = 220
+            payload["max_tokens"] = 160
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
