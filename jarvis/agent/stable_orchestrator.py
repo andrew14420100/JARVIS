@@ -9,8 +9,9 @@ from jarvis.core.state import JarvisState
 class StableJarvisOrchestrator(JarvisOrchestrator):
     """Realtime-safe orchestrator.
 
-    Keeps the live prompt bounded during long conversations and preserves a
-    valid message history when speech/streaming is interrupted mid-response.
+    Keeps the live prompt bounded during long conversations, preserves valid
+    history when speech is interrupted, and degrades gracefully when a live
+    provider stream fails instead of crashing the entire desktop voice loop.
     """
 
     def _trim_history(self) -> None:
@@ -113,17 +114,43 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
             partial = "".join(chunks).strip()
             if partial:
                 self.messages.append({"role": "assistant", "content": partial})
-            elif self.messages and self.messages[-1].get("role") == "user" and self.messages[-1].get("content") == text:
+            elif (
+                self.messages
+                and self.messages[-1].get("role") == "user"
+                and self.messages[-1].get("content") == text
+            ):
                 self.messages.pop()
             self._trim_history()
             self.set_state(JarvisState.IDLE)
             raise
-        except Exception:
+        except Exception as exc:
             partial = "".join(chunks).strip()
+            self.last_reasoning["stream_error"] = str(exc)
+
             if partial:
+                # A provider dying after first audio must not kill the whole
+                # conversation. Preserve exactly what the user already heard,
+                # return to IDLE, and let the next turn continue normally.
                 self.messages.append({"role": "assistant", "content": partial})
-            elif self.messages and self.messages[-1].get("role") == "user" and self.messages[-1].get("content") == text:
+                self._trim_history()
+                self.set_state(JarvisState.IDLE)
+                return
+
+            # Nothing was emitted yet: remove the provisional user message and
+            # retry once through the guarded/non-streaming path, which can use
+            # the client's provider fallback logic without duplicating history.
+            if (
+                self.messages
+                and self.messages[-1].get("role") == "user"
+                and self.messages[-1].get("content") == text
+            ):
                 self.messages.pop()
             self._trim_history()
-            self.set_state(JarvisState.ERROR)
-            raise
+            try:
+                reply = self.process_message(text, ambient_context=ambient_context)
+            except Exception:
+                self.set_state(JarvisState.ERROR)
+                raise
+            if reply:
+                yield reply
+            return
