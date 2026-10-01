@@ -209,6 +209,72 @@ class CosyVoiceProxyTTS:
             pcm = pcm[:-1]
         return pcm
 
+
+    def speak_stream(self, texts) -> None:
+        """Play text segments as they arrive, while prefetching the next segment."""
+        if texts is None:
+            return
+
+        import sounddevice as sd
+
+        self._interrupt.clear()
+        self._speaking.set()
+        audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=3)
+        stream = None
+
+        def produce() -> None:
+            try:
+                for text in texts:
+                    if self._interrupt.is_set():
+                        break
+                    pcm = self._buffer_segment(text)
+                    if pcm:
+                        audio_queue.put(pcm)
+                audio_queue.put(None)
+            except Exception as exc:
+                try:
+                    audio_queue.put(exc)
+                except Exception:
+                    pass
+
+        try:
+            self._health()
+            producer = threading.Thread(
+                target=produce,
+                daemon=True,
+                name="jarvis-cosyvoice-producer",
+            )
+            producer.start()
+
+            while not self._interrupt.is_set():
+                item = audio_queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                if not item:
+                    continue
+
+                if stream is None:
+                    stream = sd.RawOutputStream(
+                        samplerate=self._sample_rate,
+                        channels=1,
+                        dtype="int16",
+                        blocksize=0,
+                        latency="high",
+                    )
+                    stream.start()
+                stream.write(item)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+            self._speaking.clear()
+            self._interrupt.clear()
+
     def speak(self, text: str, streamed: bool = True) -> None:
         del streamed
         if not text or not text.strip():
