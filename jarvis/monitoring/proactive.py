@@ -40,7 +40,8 @@ class ProactiveMonitor:
 
     def _emit(self, key: str, message: str) -> None:
         now = time.monotonic()
-        if now - self._last_sent.get(key, 0.0) < self.cooldown_seconds:
+        previous = self._last_sent.get(key)
+        if previous is not None and now - previous < self.cooldown_seconds:
             return
         self._last_sent[key] = now
         try:
