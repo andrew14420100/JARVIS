@@ -206,7 +206,9 @@ class VoiceConversationEngine:
                 if event.get("type") != "delta":
                     continue
 
-                delta = clean_voice_text(str(event.get("text") or ""))
+                # Keep the raw streaming whitespace. Cleaning each token
+                # independently would turn "ciao " + "come" into "ciaocome".
+                delta = str(event.get("text") or "")
                 if not delta:
                     continue
 
