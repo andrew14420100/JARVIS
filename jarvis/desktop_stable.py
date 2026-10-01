@@ -5,9 +5,8 @@ from jarvis.agent.core_orchestrator import JarvisCoreOrchestrator
 
 
 def main() -> None:
-    # Keep every cognitive feature built while the user was away, but let the
-    # browser own realtime audio. On the target Windows/SB Katana machine this
-    # path was visibly smoother than the later duplicate PortAudio pipeline.
+    # Keep every cognitive feature, but keep heavy services out of the realtime
+    # audio loop. The browser owns microphone, echo processing and playback.
     jarvis_app.settings.tts_mode = "cosyvoice-local"
     jarvis_app.settings.cosyvoice_enabled = True
     jarvis_app.settings.cloud_tts_enabled = False
@@ -27,17 +26,17 @@ def main() -> None:
     jarvis_app.settings.core_router_enabled = True
     jarvis_app.settings.core_consensus_enabled = True
 
-    # Full transcript stays persistent, while the live prompt remains compact.
+    # Full transcript remains persistent on disk. The live prompt is deliberately
+    # small so casual conversation does not pay a long prefill on every turn.
     jarvis_app.settings.conversation_max_messages = min(
-        int(getattr(jarvis_app.settings, "conversation_max_messages", 16)),
-        16,
+        int(getattr(jarvis_app.settings, "conversation_max_messages", 14)),
+        14,
     )
     jarvis_app.settings.core_consensus_min_complexity = max(
         int(getattr(jarvis_app.settings, "core_consensus_min_complexity", 4)),
         4,
     )
 
-    # Local model first for lowest latency; free cloud routes remain fallbacks.
     jarvis_app.settings.lm_studio_fallback_enabled = True
     jarvis_app.settings.conversation_local_first = True
 
