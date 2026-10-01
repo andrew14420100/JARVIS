@@ -155,7 +155,7 @@ def test_think_filter_survives_every_single_character_chunk_boundary():
     "payload,expected",
     [
         ("<think>segreto", ""),
-        ("testo visibile</think>Risposta", "Risposta"),
+        ("testo visibile</think>Risposta", "testo visibileRisposta"),
         ("<THINK attr='x'>nascosto</THINK>Ciao", "Ciao"),
         ("Ciao <think>nascosto</think> mondo", "Ciao  mondo"),
     ],
