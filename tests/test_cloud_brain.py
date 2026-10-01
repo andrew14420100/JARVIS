@@ -91,7 +91,8 @@ def test_keeps_thinking_disabled_for_short_conversation_even_with_tools_availabl
 
     assert message["content"] == "Bene, signore."
     assert seen[0]["chat_template_kwargs"]["enable_thinking"] is False
-    assert "tools" in seen[0]
+    # Ordinary conversation should not pay the tool-schema/token overhead.
+    assert "tools" not in seen[0]
     client.close()
 
 
