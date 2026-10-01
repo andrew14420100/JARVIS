@@ -343,6 +343,91 @@ class JarvisOrchestrator:
             self.set_state(JarvisState.ERROR)
             raise
 
+
+    def process_message_stream(
+        self,
+        text: str,
+        *,
+        ambient_context: str = "",
+    ):
+        """Stream a normal conversational reply without tool round-trips."""
+        self.messages.append({"role": "user", "content": text})
+        self.set_state(JarvisState.THINKING)
+
+        messages = self._messages_with_context(
+            text,
+            ambient_context=ambient_context,
+        )
+        stream_method = getattr(self.client, "chat_completion_stream", None)
+        if not callable(stream_method):
+            message = self.client.chat_completion(
+                model=self.model,
+                messages=messages,
+                tools=None,
+                temperature=0.35,
+            )
+            content = str(message.get("content") or "")
+            self.messages.append({"role": "assistant", "content": content})
+            self.set_state(JarvisState.SPEAKING)
+            yield {"type": "delta", "text": content}
+            yield {"type": "done", "content": content}
+            return
+
+        full: list[str] = []
+        emitted = False
+        try:
+            for event in stream_method(
+                model=self.model,
+                messages=messages,
+                temperature=0.35,
+            ):
+                if event.get("type") == "delta":
+                    delta = str(event.get("text") or "")
+                    if delta:
+                        emitted = True
+                        full.append(delta)
+                        yield {"type": "delta", "text": delta}
+                elif event.get("type") == "done":
+                    break
+        except Exception:
+            if emitted:
+                self.set_state(JarvisState.ERROR)
+                raise
+
+            # If the stream failed before producing a token, retry once through
+            # the existing non-streaming path. This keeps transient SSE failures
+            # from becoming a silent voice failure.
+            message = self.client.chat_completion(
+                model=self.model,
+                messages=messages,
+                tools=None,
+                temperature=0.35,
+            )
+            content = str(message.get("content") or "")
+            self.messages.append({"role": "assistant", "content": content})
+            self.set_state(JarvisState.SPEAKING)
+            if content:
+                yield {"type": "delta", "text": content}
+            yield {"type": "done", "content": content}
+            return
+
+        content = "".join(full).strip()
+        self.messages.append({"role": "assistant", "content": content})
+        if self.memory:
+            try:
+                self.memory.remember_if_requested(text)
+            except Exception:
+                pass
+        self.last_reasoning = {
+            "used_openjarvis": False,
+            "score": 0,
+            "reasons": ["voice-stream"],
+            "agent": "",
+            "model": getattr(self.client, "last_model", self.model),
+        }
+        self.set_state(JarvisState.SPEAKING)
+        yield {"type": "done", "content": content}
+
     def reasoning_status(self) -> dict[str, Any]:
         return {
             **self.last_reasoning,
