@@ -1,12 +1,12 @@
 import { splitSpeechBuffer } from './voiceBridgeHuman';
 
 describe('JARVIS human realtime speech buffering', () => {
-  test('releases a short natural first phrase quickly', () => {
-    const result = splitSpeechBuffer('Molto bene, signore. Sto controllando il resto', {
+  test('releases the first natural packet quickly without tiny fragments', () => {
+    const result = splitSpeechBuffer('Molto bene, signore, sono qui. Sto controllando il resto', {
       firstPacket: true,
       final: false,
     });
-    expect(result.segments[0]).toBe('Molto bene, signore.');
+    expect(result.segments[0]).toBe('Molto bene, signore, sono qui.');
     expect(result.rest).toBe('Sto controllando il resto');
     expect(result.firstPacket).toBe(false);
   });
