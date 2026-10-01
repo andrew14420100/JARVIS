@@ -81,9 +81,10 @@ class Settings(BaseSettings):
 
     voice_enabled: bool = False
     audio_input_device: str = ""
+    audio_output_device: str = ""
     wake_model: str = "hey_jarvis"
-    wake_threshold: float = 0.28
-    wake_min_rms: float = 0.004
+    wake_threshold: float = 0.22
+    wake_min_rms: float = 0.00005
     wake_chunk_size: int = 1280
 
     stt_model: str = "small"
