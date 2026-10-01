@@ -5,9 +5,9 @@ from jarvis.agent.core_orchestrator import JarvisCoreOrchestrator
 
 
 def main() -> None:
-    # The stable desktop runtime is now genuinely conversational: one persistent
-    # microphone stream, no wake gate, local cloned voice, permanent memory and
-    # the federated JARVIS-Core behind one identity.
+    # Keep every cognitive feature built while the user was away, but let the
+    # browser own realtime audio. On the target Windows/SB Katana machine this
+    # path was visibly smoother than the later duplicate PortAudio pipeline.
     jarvis_app.settings.tts_mode = "cosyvoice-local"
     jarvis_app.settings.cosyvoice_enabled = True
     jarvis_app.settings.cloud_tts_enabled = False
@@ -27,8 +27,7 @@ def main() -> None:
     jarvis_app.settings.core_router_enabled = True
     jarvis_app.settings.core_consensus_enabled = True
 
-    # Keep long-term memory on disk, but keep the live prompt small so casual
-    # conversation does not pay a large prefill cost every turn.
+    # Full transcript stays persistent, while the live prompt remains compact.
     jarvis_app.settings.conversation_max_messages = min(
         int(getattr(jarvis_app.settings, "conversation_max_messages", 16)),
         16,
@@ -38,19 +37,7 @@ def main() -> None:
         4,
     )
 
-    # Human conversation endpointing. The full-duplex mic remains open after the
-    # turn, so there is no device reopen penalty when the user continues.
-    jarvis_app.settings.stt_silence_seconds = min(
-        float(getattr(jarvis_app.settings, "stt_silence_seconds", 0.28)),
-        0.28,
-    )
-    jarvis_app.settings.barge_in_min_seconds = min(
-        float(getattr(jarvis_app.settings, "barge_in_min_seconds", 0.28)),
-        0.28,
-    )
-
-    # Local first gives the lowest first-token latency. Free cloud routes remain
-    # fallbacks if the local server/model is unavailable.
+    # Local model first for lowest latency; free cloud routes remain fallbacks.
     jarvis_app.settings.lm_studio_fallback_enabled = True
     jarvis_app.settings.conversation_local_first = True
 
@@ -63,11 +50,9 @@ def main() -> None:
             jarvis_app.registry,
         )
 
-    # Import after the shared settings/orchestrator are installed so FastAPI and
-    # the voice runtime truly share one JARVIS identity and one conversation.
-    from jarvis import desktop_realtime
+    from jarvis import browser_runtime
 
-    desktop_realtime.main()
+    browser_runtime.main()
 
 
 if __name__ == "__main__":
