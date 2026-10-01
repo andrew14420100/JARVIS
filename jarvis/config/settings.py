@@ -74,10 +74,14 @@ class Settings(BaseSettings):
 
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
-    listener_followup_silence_seconds: float = 4.0
+    # Stay conversational after each answer instead of dropping to standby
+    # after only a few seconds. The runtime clamps unsafe extremes.
+    listener_followup_silence_seconds: float = 10.0
     listener_max_utterance_seconds: float = 45.0
     listener_wake_ack_enabled: bool = True
+    listener_barge_in_enabled: bool = True
     listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
+    listener_error_phrase: str = "Mi dispiace signore, ho avuto un problema nell'elaborare la richiesta."
 
     tts_mode: str = "cosyvoice-local"
     cosyvoice_enabled: bool = True
