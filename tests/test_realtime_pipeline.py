@@ -4,7 +4,7 @@ from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
 from jarvis.brain.cloud import CloudAIClient
 from jarvis.brain.lmstudio import LMStudioClient
 from jarvis.config.settings import Settings
-from jarvis.voice.cosyvoice_proxy import CosyVoiceProxyTTS
+from jarvis.voice.cosyvoice_stable import CosyVoiceProxyTTS
 
 
 class EmptyRegistry:
