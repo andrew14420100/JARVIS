@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 import json
+import re
 from typing import Any
 
 import httpx
@@ -44,13 +45,51 @@ class LMStudioClient:
             self.last_error = str(exc)
             raise LMStudioError(f"Impossibile leggere i modelli da LM Studio: {exc}") from exc
 
-    def resolve_model(self, configured_model: str = "") -> str:
-        if configured_model:
-            return configured_model
+    @staticmethod
+    def _normalize_model_name(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+    @classmethod
+    def _matches_preference(cls, loaded_model: str, preferred_model: str) -> bool:
+        loaded = cls._normalize_model_name(loaded_model)
+        preferred = cls._normalize_model_name(preferred_model)
+        if not loaded or not preferred:
+            return False
+        return loaded == preferred or loaded.endswith(preferred) or preferred.endswith(loaded)
+
+    @staticmethod
+    def _parse_preferences(preferred_models: str | Iterable[str] | None) -> list[str]:
+        if preferred_models is None:
+            return []
+        if isinstance(preferred_models, str):
+            raw = preferred_models.replace("\n", "|").replace(",", "|")
+            return [item.strip() for item in raw.split("|") if item.strip()]
+        return [str(item).strip() for item in preferred_models if str(item).strip()]
+
+    def resolve_best_model(self, preferred_models: str | Iterable[str] | None = None) -> str:
+        """Pick the first configured model that is actually available.
+
+        The priority is intentionally supplied by configuration instead of being
+        hard-coded into the client. This lets JARVIS keep many optional open
+        models installed while loading/serving only the ones the machine can
+        currently afford. Missing models are skipped without making the whole
+        voice runtime fail.
+        """
         models = self.list_models()
         if not models:
             raise LMStudioError("Nessun modello caricato in LM Studio.")
+
+        preferences = self._parse_preferences(preferred_models)
+        for preferred in preferences:
+            for loaded in models:
+                if self._matches_preference(loaded, preferred):
+                    return loaded
         return models[0]
+
+    def resolve_model(self, configured_model: str = "") -> str:
+        if configured_model:
+            return configured_model
+        return self.resolve_best_model()
 
     @staticmethod
     def _latest_user_text(messages: list[dict[str, Any]]) -> str:
