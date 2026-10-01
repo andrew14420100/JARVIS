@@ -12,7 +12,7 @@ if ($versionOk.Trim() -ne "1") {
     throw "JARVIS richiede Python >=3.10 e <3.14. Crea .venv con Python 3.11, 3.12 o 3.13."
 }
 
-Write-Host "[1/7] Aggiorno Python e dipendenze locali..."
+Write-Host "[1/8] Aggiorno Python e dipendenze locali..."
 & $python -m pip install --upgrade pip
 & $python -m pip install -r requirements-local.txt
 
@@ -62,7 +62,7 @@ if ($addedCudaDirs.Count -gt 0) {
     }
 }
 
-Write-Host "[2/7] Controllo Hybrid Brain opzionale..."
+Write-Host "[2/8] Controllo Hybrid Brain opzionale..."
 $openJarvisEnabled = $false
 if (Test-Path ".env") {
     $openJarvisLine = Get-Content ".env" | Where-Object { $_ -match '^JARVIS_OPENJARVIS_ENABLED=' } | Select-Object -Last 1
@@ -77,7 +77,7 @@ if ($openJarvisEnabled) {
     Write-Host "OpenJarvis disabilitato: salto installazione cognitiva pesante."
 }
 
-Write-Host "[3/7] Controllo NVIDIA Nemotron ASR realtime..."
+Write-Host "[3/8] Controllo NVIDIA Nemotron ASR realtime..."
 $nemoSpeech = Get-Command nemo-speech -ErrorAction SilentlyContinue
 if ($nemoSpeech) {
     try {
@@ -89,16 +89,16 @@ if ($nemoSpeech) {
     Write-Warning "NeMo-Speech.cpp non installato. Esegui .\setup-nvidia-asr.ps1 una volta per attivare il nuovo STT realtime. Per ora JARVIS usera' faster-whisper CUDA."
 }
 
-Write-Host "[4/7] Controllo modelli wake-word..."
+Write-Host "[4/8] Controllo modelli wake-word..."
 & $python -c "from openwakeword import utils; utils.download_models()"
 
-Write-Host "[5/7] Preparo configurazione..."
+Write-Host "[5/8] Preparo configurazione..."
 if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
     Copy-Item ".env.example" ".env"
     Write-Host "Creato .env da .env.example."
 }
 
-Write-Host "[6/7] Compilo la UI React/WebGL..."
+Write-Host "[6/8] Compilo la UI React/WebGL..."
 $npm = Get-Command npm -ErrorAction SilentlyContinue
 if (-not $npm) {
     throw "Node.js/npm non trovato. Installa Node.js LTS per usare la nuova UI WebGL locale."
@@ -113,7 +113,7 @@ try {
     Pop-Location
 }
 
-Write-Host "[7/7] Controllo voce locale CosyVoice..."
+Write-Host "[7/8] Controllo voce locale CosyVoice..."
 $voiceAudio = Join-Path $PSScriptRoot "private\voices\jarvis.wav"
 $voiceText = Join-Path $PSScriptRoot "private\voices\jarvis.txt"
 $cosyRepo = Join-Path $PSScriptRoot ".local\cosyvoice\CosyVoice"
