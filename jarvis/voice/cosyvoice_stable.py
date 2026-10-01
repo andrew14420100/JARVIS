@@ -9,7 +9,7 @@ from .echo import echo_reference
 
 
 class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
-    """CosyVoice client that degrades to ordinary streaming instead of silence."""
+    """CosyVoice client tuned for continuous natural realtime playback."""
 
     def __init__(
         self,
@@ -20,6 +20,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
         super().__init__(base_url=base_url, timeout_seconds=timeout_seconds)
         self.output_device = output_device
         self._selected_output_device: int | None = None
+        self._voice_audio_started = False
 
     def _candidate_output_devices(self, sd) -> list[int]:
         if not hasattr(sd, "query_devices"):
@@ -52,8 +53,6 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                     if wanted and wanted in name:
                         add(index)
         else:
-            # Target desktop uses a Sound Blaster Katana V2X. Prefer any real
-            # Katana playback endpoint before generic Windows mapper devices.
             for index in output_indexes:
                 name = str(devices[index].get("name", "")).casefold()
                 if "katana" in name:
@@ -160,6 +159,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                     continue
                 if first_audio is None:
                     first_audio = time.monotonic() - started
+                    self._voice_audio_started = True
                     print(f"[TTS] primo_audio={first_audio:.2f}s · playback={label}")
                 total_bytes += len(data)
                 echo_reference.push_pcm16(data, self._sample_rate)
@@ -271,6 +271,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
 
     @classmethod
     def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
+        """Buffer enough language to prevent audible starvation between packets."""
         buffer = ""
         first_packet = True
         for raw in cls._strip_think_chunks(chunks):
@@ -292,9 +293,13 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                 if unfinished_markup:
                     break
 
-                min_len = 14 if first_packet else 34
-                target = 20 if first_packet else 54
-                max_len = 38 if first_packet else 88
+                # The old 14-20 character first packet started very quickly but
+                # starved CosyVoice between LLM token bursts. A small look-ahead
+                # still feels immediate while giving the acoustic model enough
+                # text to speak continuously.
+                min_len = 30 if first_packet else 62
+                target = 48 if first_packet else 92
+                max_len = 74 if first_packet else 138
                 boundary = None
                 punctuation = list(re.finditer(r"[.!?;:,](?:\s+|$)", buffer))
                 for match in punctuation:
@@ -326,6 +331,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
     def speak_text_stream(self, chunks: Iterator[str]) -> None:
         source = iter(chunks)
         collected: list[str] = []
+        self._voice_audio_started = False
 
         def tracking() -> Iterator[str]:
             for chunk in source:
@@ -347,5 +353,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
             if text:
                 collected.append(text)
         fallback = "".join(collected).strip()
-        if fallback and not self._interrupt.is_set():
+        # If audio was already heard, replaying the entire accumulated answer
+        # sounds robotic and repetitive. Continue silently instead of restarting.
+        if fallback and not self._interrupt.is_set() and not self._voice_audio_started:
             self.speak(fallback, streamed=True)
