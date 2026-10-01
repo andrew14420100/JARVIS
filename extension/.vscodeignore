@@ -1,7 +1,0 @@
-node_modules/**
-src/webview/**
-build.mjs
-.vscodeignore
-*.vsix
-.deps.sha256
-package-lock.json

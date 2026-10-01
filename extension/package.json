@@ -5,6 +5,12 @@
   "version": "0.1.0",
   "publisher": "andrew14420100",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andrew14420100/JARVIS.git",
+    "directory": "extension"
+  },
+  "homepage": "https://github.com/andrew14420100/JARVIS",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -23,7 +29,8 @@
     "src/extension.js",
     "src/brain.js",
     "media/*.bundle.js",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "node build.mjs",
