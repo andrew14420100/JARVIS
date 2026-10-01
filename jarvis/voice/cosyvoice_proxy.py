@@ -134,7 +134,8 @@ class CosyVoiceProxyTTS:
         self._speaking.clear()
 
     def stream_pcm(self, text: str) -> Iterator[bytes]:
-        clean = " ".join(str(text or "").strip().split())
+        clean = self._clean_for_speech(text)
+        clean = " ".join(clean.split())
         if not clean:
             return
 
@@ -175,7 +176,33 @@ class CosyVoiceProxyTTS:
         return CosyVoiceAudio(buffer.getvalue())
 
     @staticmethod
-    def _speech_segments(text: str, max_chars: int = 88) -> list[str]:
+    def _clean_for_speech(text: str) -> str:
+        """Remove presentation markup before text reaches the cloned voice."""
+        value = str(text or "")
+        if not value.strip():
+            return ""
+
+        # Code fences/backticks become plain spoken text instead of symbols.
+        value = re.sub(r"\x60\x60\x60(?:[A-Za-z0-9_+-]+)?\\s*([\\s\\S]*?)\x60\x60\x60", r"\\1", value)
+        value = re.sub(r"\x60([^\x60]+)\x60", r"\\1", value)
+
+        # Markdown emphasis, strike-through, headings and list markers are
+        # presentation only and must never be pronounced by JARVIS.
+        value = re.sub(r"(\\*\\*|__)(.*?)\\1", r"\\2", value, flags=re.DOTALL)
+        value = re.sub(r"[\\*_~]+", "", value)
+        value = re.sub(r"^\\s*#{1,6}\\s*", "", value, flags=re.MULTILINE)
+        value = re.sub(r"^\\s*[-+•]\\s+", "", value, flags=re.MULTILINE)
+
+        # Markdown links are spoken as their visible label.
+        value = re.sub(r"\\[([^\\]]+)\\]\\([^)]*\\)", r"\\1", value)
+
+        # Keep punctuation natural for CosyVoice while collapsing whitespace.
+        value = re.sub(r"[ \\t]+", " ", value)
+        value = re.sub(r"\\n{3,}", "\\n\\n", value)
+        return value.strip()
+
+    @staticmethod
+    def _speech_segments(text: str, max_chars: int = 72) -> list[str]:
         """Create short natural segments for quick first-speech latency."""
         clean = " ".join(str(text or "").strip().split())
         if not clean:
