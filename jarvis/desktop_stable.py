@@ -5,14 +5,26 @@ from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
 
 
 def main() -> None:
-    # This runtime must always use the user's cloned local JARVIS voice.
-    # If CosyVoice is unavailable we prefer silence + a clear diagnostic over
-    # silently changing to another speaker/voice provider.
+    # Stable runtime contract: always use the user's cloned local voice and the
+    # persistent conversational features requested for desktop JARVIS. This also
+    # protects upgraded installations whose old .env still contains legacy
+    # values such as JARVIS_PRESENCE_ENABLED=false.
     jarvis_app.settings.tts_mode = "cosyvoice-local"
     jarvis_app.settings.cosyvoice_enabled = True
     jarvis_app.settings.cloud_tts_enabled = False
     jarvis_app.settings.cloud_tts_fallback_enabled = False
     jarvis_app.settings.tts_enabled = True
+
+    jarvis_app.settings.persistent_session_enabled = True
+    jarvis_app.settings.presence_enabled = True
+    jarvis_app.settings.listener_barge_in_enabled = True
+    jarvis_app.settings.speaker_auth_enabled = True
+    jarvis_app.settings.prosody_enabled = True
+    jarvis_app.settings.screen_monitor_enabled = True
+    jarvis_app.settings.proactive_enabled = True
+    jarvis_app.settings.memory_enabled = True
+    jarvis_app.settings.memory_full_transcript = True
+    jarvis_app.settings.memory_auto_semantic = True
 
     # Share one hardened orchestrator between the desktop voice loop and FastAPI.
     if jarvis_app.orchestrator is None or not isinstance(
@@ -24,20 +36,15 @@ def main() -> None:
             jarvis_app.registry,
         )
 
-    # The real microphone logs showed valid "Hey Jarvis" peaks around 0.31.
-    # Keep the verified threshold below that while still removing the old 0.16
-    # soft-trigger path that caused normal speech / the wake phrase itself to be
-    # mistaken for a user command.
+    # Real microphone logs showed valid "Hey Jarvis" peaks around 0.31.
     jarvis_app.settings.wake_threshold = min(
         float(getattr(jarvis_app.settings, "wake_threshold", 0.28)),
         0.28,
     )
 
-    # Import only after the shared stable agent/settings are installed.
+    # Import only after shared settings/orchestrator are installed.
     from jarvis import desktop
 
-    # The wake listener captures post-wake PCM concurrently, so the old 380 ms
-    # delay only made first response slower. Keep a short acoustic tail guard.
     desktop.POST_WAKE_CAPTURE_DELAY_SECONDS = 0.14
     desktop.ACOUSTIC_GUARD_SECONDS = 0.18
     desktop.main()
