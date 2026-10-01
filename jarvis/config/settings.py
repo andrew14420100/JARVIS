@@ -29,11 +29,23 @@ class Settings(BaseSettings):
     cloud_app_name: str = "JARVIS"
     cloud_app_url: str = ""
 
-    # Local Qwen in LM Studio is the low-latency conversational path. Cloud
-    # providers stay available for guarded/tool-heavy turns and as fallbacks.
+    # Open-weight local model pool. The order is efficiency-first, not a
+    # benchmark ranking: JARVIS picks the first model in this list that the
+    # OpenAI-compatible local server reports as currently available. This keeps
+    # the very large models optional instead of loading them all into RAM/VRAM.
     lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
     lm_studio_fallback_enabled: bool = True
     conversation_local_first: bool = True
+    local_model_priority: str = (
+        "zai-org/GLM-4.7-Flash|"
+        "Qwen/Qwen3.6-35B-A3B|"
+        "Qwen/Qwen3.8-27B|"
+        "LGAI-EXAONE/EXAONE-4.5-33B|"
+        "llm-jp/llm-jp-3-13b-instruct3|"
+        "llm-jp/llm-jp-3-172b-instruct3|"
+        "deepseek-ai/DeepSeek-V3.2-Exp|"
+        "LGAI-EXAONE/K-EXAONE-2.0"
+    )
 
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
