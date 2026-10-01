@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -56,6 +57,27 @@ class WakeWordListener(_BaseWakeWordListener):
         soft_threshold = max(0.10, min(float(soft_activation_threshold), self.threshold - 0.01))
         soft_needed = max(2, int(soft_activation_consecutive))
         soft_hits = 0
+
+        # If desktop code does not supply a dedicated verifier, use the same
+        # persisted speaker-profile format directly. Crucially, the soft path is
+        # disabled until at least one authorized profile exists, so a fresh
+        # install still requires the high-confidence "Hey Jarvis" activation.
+        if standby_soft_activation is None:
+            try:
+                from .identity import SpeakerAuthenticator
+
+                profiles_dir = os.getenv("JARVIS_SPEAKER_PROFILES_DIR", "data/speaker_profiles")
+                threshold = float(os.getenv("JARVIS_SPEAKER_MATCH_THRESHOLD", "0.78"))
+                soft_authenticator = SpeakerAuthenticator(profiles_dir, threshold)
+
+                def verify_soft_candidate(audio) -> bool:
+                    if not soft_authenticator.has_profiles():
+                        return False
+                    return soft_authenticator.identify(audio, self.sample_rate).authorized
+
+                standby_soft_activation = verify_soft_candidate
+            except Exception:
+                standby_soft_activation = None
 
         speech_frames: list[Any] = []
         speech_samples = 0
@@ -170,7 +192,6 @@ class WakeWordListener(_BaseWakeWordListener):
                         # "Jarvis" below its full-phrase threshold. Allow a lower
                         # gate only in standby, only after two consecutive hits,
                         # and only when an already-enrolled speaker verifies it.
-                        # This avoids restoring the old unrestricted soft trigger.
                         if (
                             not active
                             and standby_soft_activation is not None
