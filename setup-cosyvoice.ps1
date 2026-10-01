@@ -122,7 +122,7 @@ if ($nvidiaSmi) {
 }
 
 if ($gpuName -match 'RTX\s*50') {
-    Write-Host "  - Rilevata $gpuName: aggiorno PyTorch/Torchaudio per Blackwell (CUDA 12.8)..." -ForegroundColor Cyan
+    Write-Host "  - Rilevata ${gpuName}: aggiorno PyTorch/Torchaudio per Blackwell (CUDA 12.8)..." -ForegroundColor Cyan
     & $condaExe run --no-capture-output -n jarvis-cosyvoice python -m pip install --upgrade --force-reinstall --no-deps "torch==2.7.1" "torchaudio==2.7.1" --index-url https://download.pytorch.org/whl/cu128
     Assert-LastExit "Installazione PyTorch 2.7.1 CUDA 12.8 per RTX 50"
 
