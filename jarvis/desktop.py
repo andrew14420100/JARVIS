@@ -291,11 +291,11 @@ def main() -> None:
         # ownership to the command STT.
         time.sleep(POST_WAKE_CAPTURE_DELAY_SECONDS)
         post_wake_audio = None
-            try:
-                post_wake_audio = wake.post_wake_audio(
-                    seconds=0.72,
-                    exclude_head_seconds=0.08,
-                )
+        try:
+            post_wake_audio = wake.post_wake_audio(
+                seconds=0.72,
+                exclude_head_seconds=0.08,
+            )
         except Exception:
             post_wake_audio = None
 
