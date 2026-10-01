@@ -291,7 +291,7 @@ class NvidiaRealtimeSTT:
                             if len(noise_samples) > 30:
                                 noise_samples.pop(0)
                             if (
-                                not activation_audio
+                                (activation_audio is None or not getattr(activation_audio, "size", 0))
                                 and initial_chunks is not None
                                 and index + 1 >= initial_chunks
                             ):
