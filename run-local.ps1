@@ -14,7 +14,9 @@ if ($versionOk.Trim() -ne "1") {
 
 Write-Host "[1/7] Aggiorno Python e dipendenze locali..."
 & $python -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "Aggiornamento pip fallito (exit code $LASTEXITCODE)." }
 & $python -m pip install -r requirements-local.txt
+if ($LASTEXITCODE -ne 0) { throw "Installazione dipendenze Python fallita (exit code $LASTEXITCODE)." }
 
 # faster-whisper/CTranslate2 on Windows expects CUDA 12 cuBLAS and cuDNN DLLs
 # on PATH. The CosyVoice environment already contains a Blackwell-compatible
@@ -73,12 +75,14 @@ if (Test-Path ".env") {
 if ($openJarvisEnabled) {
     Write-Host "OpenJarvis abilitato: installo/aggiorno il modulo cognitivo..."
     & $python -m pip install -r requirements-cognitive.txt
+    if ($LASTEXITCODE -ne 0) { throw "Installazione Hybrid Brain fallita (exit code $LASTEXITCODE)." }
 } else {
     Write-Host "OpenJarvis disabilitato: salto installazione cognitiva pesante."
 }
 
 Write-Host "[3/7] Controllo modelli wake-word..."
 & $python -c "from openwakeword import utils; utils.download_models()"
+if ($LASTEXITCODE -ne 0) { throw "Preparazione modelli wake-word fallita (exit code $LASTEXITCODE)." }
 
 Write-Host "[4/7] Preparo configurazione..."
 if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
@@ -93,10 +97,24 @@ if (-not $npm) {
 }
 Push-Location "frontend"
 try {
-    if (-not (Test-Path "node_modules")) {
-        npm install
+    $reactScriptsCmd = Join-Path (Get-Location) "node_modules\.bin\react-scripts.cmd"
+    $reactScriptsJs = Join-Path (Get-Location) "node_modules\react-scripts\bin\react-scripts.js"
+    if (-not (Test-Path $reactScriptsCmd) -or -not (Test-Path $reactScriptsJs)) {
+        Write-Host "Dipendenze frontend incomplete o react-scripts mancante: riparo node_modules..." -ForegroundColor Yellow
+        npm install --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm install frontend fallito (exit code $LASTEXITCODE)."
+        }
     }
+
+    if (-not (Test-Path $reactScriptsCmd) -or -not (Test-Path $reactScriptsJs)) {
+        throw "react-scripts non e' disponibile dopo npm install. Elimina frontend\node_modules e riprova."
+    }
+
     npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Build frontend fallita (exit code $LASTEXITCODE)."
+    }
 } finally {
     Pop-Location
 }
@@ -120,6 +138,9 @@ if ((Test-Path $voiceAudio) -and (Test-Path $voiceText) -and (Test-Path $cosyRep
     if (-not (Test-CosyVoiceReady)) {
         Write-Host "Avvio CosyVoice 3 in background..."
         powershell -ExecutionPolicy Bypass -File ".\start-cosyvoice.ps1" -Background
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Avvio script CosyVoice fallito; provo comunque il controllo health."
+        }
 
         $ready = $false
         for ($i = 0; $i -lt 120; $i++) {
