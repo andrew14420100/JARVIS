@@ -32,6 +32,19 @@ class EchoReference:
         with self._lock:
             self._chunks.clear()
 
+    @staticmethod
+    def _resample_linear(values, src_rate: int, dst_rate: int):
+        import numpy as np
+
+        if src_rate <= 0 or dst_rate <= 0 or src_rate == dst_rate:
+            return values
+        if values.size < 2:
+            return values
+        new_size = max(2, int(round(values.size * float(dst_rate) / float(src_rate))))
+        old_x = np.linspace(0.0, 1.0, values.size, dtype=np.float32)
+        new_x = np.linspace(0.0, 1.0, new_size, dtype=np.float32)
+        return np.interp(new_x, old_x, values).astype(np.float32)
+
     def correlation(self, mic_audio, sample_rate: int) -> float:
         import numpy as np
 
@@ -39,18 +52,31 @@ class EchoReference:
         if mic.size < 320:
             return 0.0
         with self._lock:
-            chunks = [item for item in self._chunks if item[1] == int(sample_rate)]
+            chunks = list(self._chunks)
         if not chunks:
             return 0.0
-        raw = b"".join(item[2] for item in chunks)
-        ref = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+        # Output is normally 24 kHz while the microphone path is 16 kHz.
+        # Resample each contiguous group before correlation instead of silently
+        # disabling the echo guard when sample rates differ.
+        groups: list[tuple[int, bytearray]] = []
+        for _ts, rate, raw in chunks:
+            if not groups or groups[-1][0] != rate:
+                groups.append((rate, bytearray()))
+            groups[-1][1].extend(raw)
+        refs = []
+        for rate, raw in groups:
+            arr = np.frombuffer(bytes(raw), dtype=np.int16).astype(np.float32) / 32768.0
+            if arr.size:
+                refs.append(self._resample_linear(arr, rate, int(sample_rate)))
+        if not refs:
+            return 0.0
+        ref = np.concatenate(refs)
         if ref.size < 320:
             return 0.0
 
-        # Search recent alignments because speaker->microphone delay depends on
-        # Windows/audio hardware. Downsample for a cheap correlation check.
         mic = mic[-min(mic.size, int(sample_rate * 0.8)):]
-        ref = ref[-min(ref.size, int(sample_rate * 1.4)):]
+        ref = ref[-min(ref.size, int(sample_rate * 1.6)):]
         step = max(1, int(sample_rate / 4000))
         m = mic[::step]
         r = ref[::step]
@@ -62,8 +88,8 @@ class EchoReference:
             return 0.0
 
         best = 0.0
-        search_step = max(8, m.size // 12)
-        start = max(0, r.size - m.size - int(sample_rate * 0.6 / step))
+        search_step = max(8, m.size // 14)
+        start = max(0, r.size - m.size - int(sample_rate * 0.8 / step))
         end = max(start + 1, r.size - m.size + 1)
         for offset in range(start, end, search_step):
             segment = r[offset:offset + m.size]
