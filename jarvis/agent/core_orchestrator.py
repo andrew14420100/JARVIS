@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import time
 from typing import Any
 
 from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
@@ -8,14 +9,7 @@ from jarvis.brain.core_router import CoreDecision, JarvisCoreRouter, classify_ta
 
 
 class JarvisCoreOrchestrator(StableJarvisOrchestrator):
-    """One JARVIS identity backed by a federation of specialist AI models.
-
-    The user always talks to JARVIS. Internally this layer classifies each turn,
-    chooses the best already-available specialist, and for genuinely difficult
-    work can ask a second available model for a short critique/plan before the
-    primary model produces the final response. No model is auto-loaded solely
-    for consensus, so ordinary conversation stays fast and resource-friendly.
-    """
+    """One JARVIS identity backed by a federation of specialist AI models."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -25,12 +19,23 @@ class JarvisCoreOrchestrator(StableJarvisOrchestrator):
         )
         self._core_decision: CoreDecision | None = None
         self._core_advisor_context = ""
+        self._loaded_models_cache: list[str] = []
+        self._loaded_models_cached_at = 0.0
 
     def _local_brain(self):
         local = getattr(self.client, "_local_fallback", None)
         if local is None and self.client.__class__.__name__.lower().startswith("lmstudio"):
             local = self.client
         return local
+
+    def _loaded_local_models(self, local) -> list[str]:
+        now = time.monotonic()
+        if self._loaded_models_cache and now - self._loaded_models_cached_at < 30.0:
+            return list(self._loaded_models_cache)
+        loaded = [str(item) for item in local.list_models() if str(item).strip()]
+        self._loaded_models_cache = loaded
+        self._loaded_models_cached_at = now
+        return list(loaded)
 
     def _prepare_core_route(self, text: str, *, has_image: bool = False) -> None:
         self._core_decision = None
@@ -42,7 +47,7 @@ class JarvisCoreOrchestrator(StableJarvisOrchestrator):
         if local is None:
             return
         try:
-            loaded = local.list_models()
+            loaded = self._loaded_local_models(local)
         except Exception as exc:
             self.last_reasoning["core_router_error"] = str(exc)
             return
@@ -64,8 +69,6 @@ class JarvisCoreOrchestrator(StableJarvisOrchestrator):
         if not bool(getattr(self.settings, "core_consensus_enabled", True)):
             return
 
-        # Consensus is intentionally reserved for complex turns. The advisor is
-        # asked for a compact technical review, never a second user-facing voice.
         try:
             recent = []
             for message in self.messages[-8:]:
@@ -101,7 +104,6 @@ class JarvisCoreOrchestrator(StableJarvisOrchestrator):
             if content:
                 self._core_advisor_context = content[:max_chars]
         except Exception as exc:
-            # A failed advisor must never block the primary conversation.
             self.last_reasoning["core_advisor_error"] = str(exc)
             self._core_advisor_context = ""
 
@@ -167,8 +169,8 @@ class JarvisCoreOrchestrator(StableJarvisOrchestrator):
             if emitted:
                 raise
             self.last_reasoning["core_primary_error"] = str(exc)
+            self._loaded_models_cached_at = 0.0
 
-        # Specialist unavailable mid-turn: fall back to the proven stable route.
         yield from super()._chat_stream(request_messages)
 
     def _visual_intent(self, text: str) -> bool:
