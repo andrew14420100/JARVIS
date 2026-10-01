@@ -7,6 +7,6 @@ without the desktop voice stack installed.
 from .cosyvoice_proxy import CosyVoiceProxyTTS
 from .stt import LocalSTT
 from .tts import LocalTTS
-from .wake import WakeWordListener
+from .wake_stable import WakeWordListener
 
 __all__ = ["CosyVoiceProxyTTS", "LocalSTT", "LocalTTS", "WakeWordListener"]
