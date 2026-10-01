@@ -28,6 +28,30 @@ def main() -> None:
     jarvis_app.settings.core_router_enabled = True
     jarvis_app.settings.core_consensus_enabled = True
 
+    # Keep the complete transcript in SQLite but keep the live prompt compact.
+    # This preserves long-term memory without making every casual voice turn pay
+    # for a large multi-turn prefill.
+    jarvis_app.settings.conversation_max_messages = min(
+        int(getattr(jarvis_app.settings, "conversation_max_messages", 20)),
+        20,
+    )
+    jarvis_app.settings.core_consensus_min_complexity = max(
+        int(getattr(jarvis_app.settings, "core_consensus_min_complexity", 4)),
+        4,
+    )
+
+    # Natural endpointing: a human pause around 300 ms should normally finish a
+    # short turn, while the incomplete-phrase detector still gives hesitations a
+    # second chance when a sentence clearly hangs.
+    jarvis_app.settings.stt_silence_seconds = min(
+        float(getattr(jarvis_app.settings, "stt_silence_seconds", 0.32)),
+        0.32,
+    )
+    jarvis_app.settings.barge_in_min_seconds = min(
+        float(getattr(jarvis_app.settings, "barge_in_min_seconds", 0.34)),
+        0.34,
+    )
+
     # The local model is the fastest and most reliable zero-cost brain when it is
     # available. Cloud-free providers remain fallbacks, never the only route.
     jarvis_app.settings.lm_studio_fallback_enabled = True
@@ -60,8 +84,8 @@ def main() -> None:
     # Import only after shared settings/orchestrator are installed.
     from jarvis import desktop
 
-    desktop.POST_WAKE_CAPTURE_DELAY_SECONDS = 0.14
-    desktop.ACOUSTIC_GUARD_SECONDS = 0.18
+    desktop.POST_WAKE_CAPTURE_DELAY_SECONDS = 0.10
+    desktop.ACOUSTIC_GUARD_SECONDS = 0.10
     desktop.main()
 
 
