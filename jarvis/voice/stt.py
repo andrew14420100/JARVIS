@@ -14,11 +14,15 @@ class STTResult:
 
 
 class LocalSTT:
-    """Lazy faster-whisper wrapper with low-latency microphone capture."""
+    """Low-latency faster-whisper microphone engine.
+
+    The model is kept warm on CUDA. Endpoint detection happens before decode,
+    so Whisper receives only the spoken turn instead of a long silence window.
+    """
 
     def __init__(
         self,
-        model_name: str = "small",
+        model_name: str = "turbo",
         device: str = "auto",
         compute_type: str = "float16",
         language: str = "it",
@@ -71,26 +75,44 @@ class LocalSTT:
                 self.model_name,
                 device=requested_device,
                 compute_type=compute_type,
+                cpu_threads=4,
+                num_workers=1,
             )
             self._model = model
             self._model_device = requested_device
         except Exception:
             if requested_device == "cpu":
                 raise
-            model = WhisperModel(self.model_name, device="cpu", compute_type="int8")
+            print(
+                f"[STT] Modello {self.model_name!r} non disponibile su CUDA; "
+                "provo lo stesso modello su CPU."
+            )
+            model = WhisperModel(
+                self.model_name,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=4,
+                num_workers=1,
+            )
             self._model = model
             self._model_device = "cpu"
         return self._model
 
-    def _transcribe_once(self, model, audio, *, beam_size: int = 1, vad_filter: bool = False):
-        """Run one Whisper pass and eagerly consume its lazy generator."""
+    def _transcribe_once(self, model, audio, *, beam_size: int = 1):
+        """Decode only text; no timestamps, beam search or temperature fallback."""
         segments, info = model.transcribe(
             audio,
             beam_size=beam_size,
+            best_of=1,
             language=self.language or None,
-            vad_filter=vad_filter,
-            condition_on_previous_text=False,
+            task="transcribe",
             temperature=0.0,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+            word_timestamps=False,
+            vad_filter=False,
+            suppress_blank=True,
+            max_new_tokens=128,
         )
         segments = list(segments)
         text = " ".join(segment.text.strip() for segment in segments).strip()
@@ -105,16 +127,17 @@ class LocalSTT:
 
         started = time.monotonic()
         model = self._load_model()
-        probe = np.zeros(8000, dtype=np.float32)
+        probe = np.zeros(3200, dtype=np.float32)
         try:
-            self._transcribe_once(model, probe, beam_size=1, vad_filter=False)
+            self._transcribe_once(model, probe, beam_size=1)
         except Exception as exc:
             if self._model_device != "cpu":
                 print(f"[STT] Warm-up GPU non disponibile ({exc}); fallback CPU.")
                 model = self._load_model(force_cpu=True)
-                self._transcribe_once(model, probe, beam_size=1, vad_filter=False)
+                self._transcribe_once(model, probe, beam_size=1)
             else:
                 raise
+
         self._warm = True
         return self._model_device or "unknown", time.monotonic() - started
 
@@ -125,12 +148,16 @@ class LocalSTT:
         if not array.size:
             self.last_recording_gain = 1.0
             return array
+
         peak = float(np.max(np.abs(array)))
         if peak <= 1e-6:
             self.last_recording_gain = 1.0
             return array
+
+        # Normalize quiet microphones without amplifying room silence to a
+        # level where Whisper starts hallucinating.
         target_peak = 0.22
-        gain = min(24.0, max(1.0, target_peak / peak))
+        gain = min(12.0, max(1.0, target_peak / peak))
         self.last_recording_gain = gain
         if gain <= 1.01:
             return array
@@ -144,32 +171,25 @@ class LocalSTT:
 
         model = self._load_model()
         try:
-            # JARVIS already performs endpoint detection before this call. A
-            # second Silero VAD pass inside faster-whisper only adds latency.
-            return self._transcribe_once(model, normalized, beam_size=1, vad_filter=False)
+            return self._transcribe_once(model, normalized, beam_size=1)
         except Exception as exc:
             if self._model_device != "cpu":
                 print(f"[STT] GPU non disponibile ({exc}); fallback CPU.")
                 model = self._load_model(force_cpu=True)
                 self._warm = True
-                return self._transcribe_once(model, normalized, beam_size=1, vad_filter=False)
+                return self._transcribe_once(model, normalized, beam_size=1)
             raise
 
     def record_until_silence(
         self,
         sample_rate: int = 16000,
         silence_threshold: float = 0.00045,
-        speech_threshold: float = 0.00090,
-        silence_seconds: float = 0.36,
+        speech_threshold: float = 0.00075,
+        silence_seconds: float = 0.28,
         max_seconds: float = 30.0,
-        initial_silence_seconds: float | None = 6.0,
+        initial_silence_seconds: float | None = 2.0,
     ):
-        """Record one turn using adaptive energy endpointing.
-
-        Only a tiny pre-roll before the first speech frame is retained. The old
-        implementation sent seconds of waiting/silence to Whisper, which made a
-        short spoken request unnecessarily expensive to decode.
-        """
+        """Capture one spoken turn with fast adaptive endpoint detection."""
         import numpy as np
         import sounddevice as sd
 
@@ -182,13 +202,16 @@ class LocalSTT:
         self.last_recording_gain = 1.0
         self.last_recording_end_reason = ""
 
-        chunk_seconds = 0.08
+        chunk_seconds = 0.06
         chunk = int(sample_rate * chunk_seconds)
-        silent_needed = max(1, int(silence_seconds / chunk_seconds))
+        silent_needed = max(1, int(np.ceil(silence_seconds / chunk_seconds)))
         max_chunks = max(1, int(max_seconds / chunk_seconds))
         initial_chunks = None
         if initial_silence_seconds is not None:
-            initial_chunks = max(1, int(max(0.2, initial_silence_seconds) / chunk_seconds))
+            initial_chunks = max(
+                1,
+                int(max(0.15, initial_silence_seconds) / chunk_seconds),
+            )
 
         silent_chunks = 0.0
         heard_speech = False
@@ -220,12 +243,16 @@ class LocalSTT:
                 self.last_recording_max_rms = max(self.last_recording_max_rms, rms)
 
                 if not heard_speech:
-                    if noise_samples:
-                        noise_floor = float(np.percentile(np.asarray(noise_samples, dtype=np.float32), 45))
-                    else:
-                        noise_floor = 0.0
-
-                    adaptive_speech = max(float(speech_threshold), 0.00090, noise_floor * 2.20)
+                    noise_floor = (
+                        float(np.percentile(np.asarray(noise_samples, dtype=np.float32), 45))
+                        if noise_samples
+                        else 0.0
+                    )
+                    adaptive_speech = max(
+                        float(speech_threshold),
+                        0.00075,
+                        noise_floor * 2.10,
+                    )
                     self.last_recording_noise_floor = noise_floor
                     self.last_recording_speech_threshold = adaptive_speech
 
@@ -235,9 +262,9 @@ class LocalSTT:
                         frozen_speech_threshold = adaptive_speech
                         frozen_release_threshold = max(
                             float(silence_threshold),
-                            0.00055,
-                            noise_floor * 1.60,
-                            adaptive_speech * 0.48,
+                            0.00045,
+                            noise_floor * 1.55,
+                            adaptive_speech * 0.45,
                         )
                         self.last_recording_release_threshold = frozen_release_threshold
                         recording.extend(pre_roll)
@@ -262,7 +289,11 @@ class LocalSTT:
                         self.last_recording_end_reason = "silence"
                         break
 
-                if not heard_speech and initial_chunks is not None and index + 1 >= initial_chunks:
+                if (
+                    not heard_speech
+                    and initial_chunks is not None
+                    and index + 1 >= initial_chunks
+                ):
                     self.last_recording_end_reason = "initial-timeout"
                     break
             else:
@@ -270,6 +301,7 @@ class LocalSTT:
 
         if not heard_speech or not recording:
             return np.zeros(0, dtype=np.float32)
+
         return np.concatenate(recording).astype(np.float32, copy=False)
 
     def abort(self) -> None:
