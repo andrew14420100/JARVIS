@@ -10,8 +10,8 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
 
     @classmethod
     def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
-        # Reuse the native-bistream segmenter but release the first phrase a bit
-        # earlier so JARVIS starts speaking closer to the first LLM tokens.
+        # Release the first natural phrase early so JARVIS can start speaking
+        # while the LLM is still generating the rest of the sentence.
         import re
 
         buffer = ""
@@ -35,16 +35,28 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                 if unfinished_markup:
                     break
 
-                target = 22 if first_packet else 56
+                min_len = 14 if first_packet else 34
+                target = 20 if first_packet else 54
                 max_len = 38 if first_packet else 88
                 boundary = None
-                for match in re.finditer(r"[.!?;:,](?:\s+|$)", buffer):
-                    if match.end() >= target:
+
+                # Prefer a real punctuation boundary inside the latency window.
+                punctuation = list(re.finditer(r"[.!?;:,](?:\s+|$)", buffer))
+                for match in punctuation:
+                    if min_len <= match.end() <= max_len:
                         boundary = match.end()
                         break
+                # Otherwise use the first punctuation after the target only if
+                # it is still reasonably close.
+                if boundary is None:
+                    for match in punctuation:
+                        if target <= match.end() <= max_len:
+                            boundary = match.end()
+                            break
+
                 if boundary is None and len(buffer) >= max_len:
                     cut = buffer.rfind(" ", 0, max_len + 1)
-                    if cut >= max(14, target // 2):
+                    if cut >= min_len:
                         boundary = cut
                 if boundary is None:
                     break
