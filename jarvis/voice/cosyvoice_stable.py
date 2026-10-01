@@ -271,7 +271,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
 
     @classmethod
     def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
-        """Buffer enough language to prevent audible starvation between packets."""
+        """Start promptly, then buffer enough text to avoid audible starvation."""
         buffer = ""
         first_packet = True
         for raw in cls._strip_think_chunks(chunks):
@@ -293,13 +293,9 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                 if unfinished_markup:
                     break
 
-                # The old 14-20 character first packet started very quickly but
-                # starved CosyVoice between LLM token bursts. A small look-ahead
-                # still feels immediate while giving the acoustic model enough
-                # text to speak continuously.
-                min_len = 30 if first_packet else 62
-                target = 48 if first_packet else 92
-                max_len = 74 if first_packet else 138
+                min_len = 28 if first_packet else 62
+                target = 36 if first_packet else 92
+                max_len = 40 if first_packet else 138
                 boundary = None
                 punctuation = list(re.finditer(r"[.!?;:,](?:\s+|$)", buffer))
                 for match in punctuation:
@@ -353,7 +349,5 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
             if text:
                 collected.append(text)
         fallback = "".join(collected).strip()
-        # If audio was already heard, replaying the entire accumulated answer
-        # sounds robotic and repetitive. Continue silently instead of restarting.
         if fallback and not self._interrupt.is_set() and not self._voice_audio_started:
             self.speak(fallback, streamed=True)
