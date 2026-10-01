@@ -193,13 +193,10 @@ class CosyVoiceProxyTTS:
         value = re.sub(r"\n{3,}", "\n\n", value)
         return value.strip()
 
-    @staticmethod
-    def _speech_segments(text: str, max_chars: int = 72) -> list[str]:
+    def _speech_segments(self, text: str, max_chars: int = 72) -> list[str]:
         """Create short natural segments for quick first-speech latency."""
-        clean = self._clean_for_speech(text) if False else ""
-        # Keep this method static for compatibility; cleaning is repeated by
-        # stream_pcm immediately before synthesis.
-        clean = " ".join(str(text or "").strip().split())
+        clean = self._clean_for_speech(text)
+        clean = " ".join(clean.split())
         if not clean:
             return []
 
