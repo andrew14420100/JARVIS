@@ -4,7 +4,7 @@ Heavy optional dependencies are imported lazily so the cloud/web build can run
 without the desktop voice stack installed.
 """
 
-from .cosyvoice_proxy import CosyVoiceProxyTTS
+from .cosyvoice_stable import CosyVoiceProxyTTS
 from .stt_stable import LocalSTT
 from .tts import LocalTTS
 from .wake_stable import WakeWordListener
