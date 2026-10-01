@@ -1,0 +1,42 @@
+name: JARVIS Foundation Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  windows-wrapper:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify pinned upstream
+        shell: powershell
+        run: |
+          $sha = git -C personal-jarvis rev-parse HEAD
+          if ($sha.Trim() -ne 'e70b61fc30eff54857e8a2d183ce22f40985f3a0') { throw "Unexpected upstream $sha" }
+      - name: Parse launcher
+        shell: powershell
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '.\run-local.ps1'), [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+
+  source-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install source foundation
+        run: python -m pip install -e ./personal-jarvis
+      - name: Import and version smoke
+        run: |
+          python -c "import jarvis; print(getattr(jarvis, '__version__', 'ok'))"
+          python -m jarvis --version
