@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,7 +8,6 @@ PERSONA_SOURCE = ROOT / "custom" / "jarvis_video_persona.md"
 
 
 def apply_profile() -> None:
-    """Apply the JARVIS-from-video persona without changing the underlying engine."""
     if not PERSONA_SOURCE.is_file():
         raise FileNotFoundError(f"Profilo JARVIS mancante: {PERSONA_SOURCE}")
 
@@ -32,9 +32,15 @@ def apply_profile() -> None:
 
 def main() -> int:
     apply_profile()
-    from jarvis.__main__ import main as jarvis_main
+    from jarvis.ui.web.launcher import main as backend_main
 
-    return int(jarvis_main() or 0)
+    previous = sys.argv[:]
+    try:
+        sys.argv = ["jarvis-launcher", "--headless"]
+        print("[JARVIS] Backend voce headless: la vecchia finestra desktop e' disattivata.")
+        return int(backend_main() or 0)
+    finally:
+        sys.argv = previous
 
 
 if __name__ == "__main__":
