@@ -5,7 +5,7 @@ without the desktop voice stack installed.
 """
 
 from .cosyvoice_proxy import CosyVoiceProxyTTS
-from .stt import LocalSTT
+from .stt_stable import LocalSTT
 from .tts import LocalTTS
 from .wake_stable import WakeWordListener
 
