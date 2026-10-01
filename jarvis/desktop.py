@@ -286,23 +286,26 @@ def main() -> None:
         if wake.selected_device is not None:
             stt.input_device = wake.selected_device
 
-        wake.pause()
-        try:
-            time.sleep(POST_WAKE_CAPTURE_DELAY_SECONDS)
-            print("[JARVIS] Ti ascolto...")
-
-            post_wake_audio = None
+        # Keep the wake listener alive for a very short tail so a fast
+        # "Hey Jarvis, ..." command is captured before the microphone changes
+        # ownership to the command STT.
+        time.sleep(POST_WAKE_CAPTURE_DELAY_SECONDS)
+        post_wake_audio = None
             try:
                 post_wake_audio = wake.post_wake_audio(
                     seconds=0.72,
                     exclude_head_seconds=0.08,
                 )
-            except Exception:
-                post_wake_audio = None
+        except Exception:
+            post_wake_audio = None
 
-            continued, post_peak, post_noise, post_threshold = _post_wake_speech_profile(
-                post_wake_audio
-            )
+        continued, post_peak, post_noise, post_threshold = _post_wake_speech_profile(
+            post_wake_audio
+        )
+
+        wake.pause()
+        try:
+            print("[JARVIS] Ti ascolto...")
 
             if continued:
                 print(
