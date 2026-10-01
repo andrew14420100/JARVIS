@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     """Runtime configuration for JARVIS.
 
     Values can be overridden with environment variables prefixed by JARVIS_.
-    Heavy local voice/cognitive components remain optional.
+    Heavy components are optional and are kept off the latency-critical path.
     """
 
     brain_mode: str = "cloud"
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 120.0
     user_name: str = "Signore"
 
-    # Public cloud AI. Secrets stay server-side and are never sent to React.
+    # Public/free cloud routes. No paid provider is required by default.
     nvidia_api_key: str = ""
     nvidia_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     zai_api_key: str = ""
@@ -29,10 +29,8 @@ class Settings(BaseSettings):
     cloud_app_name: str = "JARVIS"
     cloud_app_url: str = ""
 
-    # Open-weight local model pool. The order is efficiency-first, not a
-    # benchmark ranking: JARVIS picks the first model in this list that the
-    # OpenAI-compatible local server reports as currently available. This keeps
-    # the very large models optional instead of loading them all into RAM/VRAM.
+    # Open-weight local model pool. Only an already-served model is selected;
+    # JARVIS never attempts to keep this whole list resident in RAM/VRAM.
     lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
     lm_studio_fallback_enabled: bool = True
     conversation_local_first: bool = True
@@ -46,6 +44,7 @@ class Settings(BaseSettings):
         "deepseek-ai/DeepSeek-V3.2-Exp|"
         "LGAI-EXAONE/K-EXAONE-2.0"
     )
+    vision_model_priority: str = "LGAI-EXAONE/EXAONE-4.5-33B"
 
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
@@ -53,24 +52,28 @@ class Settings(BaseSettings):
     deep_reasoning_enabled: bool = True
     deep_reasoning_min_score: int = 4
 
+    # Permanent local memory: complete transcript + semantic snippets.
     memory_enabled: bool = True
     memory_db_path: str = "data/jarvis_memory.sqlite3"
-    memory_top_k: int = 4
+    memory_top_k: int = 8
+    memory_full_transcript: bool = True
+    memory_auto_semantic: bool = True
+    memory_redact_secrets: bool = True
+    memory_recent_search_limit: int = 1200
 
-    # Keep the live prompt bounded so long voice sessions do not slow down.
-    conversation_max_messages: int = 32
+    # The live LLM prompt stays bounded even though the full transcript is kept.
+    conversation_max_messages: int = 40
+    persistent_session_enabled: bool = True
+    persistent_session_poll_seconds: float = 12.0
 
-    presence_enabled: bool = False
-    presence_context_seconds: float = 30.0
-    presence_max_items: int = 12
-    presence_max_chars: int = 5000
+    presence_enabled: bool = True
+    presence_context_seconds: float = 120.0
+    presence_max_items: int = 24
+    presence_max_chars: int = 9000
 
     voice_enabled: bool = False
     audio_input_device: str = ""
     wake_model: str = "hey_jarvis"
-    # The user's real wake samples peak around 0.31. The old 0.50 gate missed
-    # them; the previous ~0.16 soft path was too permissive. 0.28 plus an RMS
-    # gate is a practical middle ground and remains configurable in .env.
     wake_threshold: float = 0.28
     wake_min_rms: float = 0.004
     wake_chunk_size: int = 1280
@@ -79,21 +82,53 @@ class Settings(BaseSettings):
     stt_device: str = "auto"
     stt_compute_type: str = "float16"
     stt_language: str = "it"
-    # End-of-turn latency after the user stops speaking. 420 ms is fast enough
-    # for natural back-and-forth without cutting ordinary short pauses as often
-    # as the former 360 ms endpoint.
-    stt_silence_seconds: float = 0.42
+    stt_silence_seconds: float = 0.55
+    stt_incomplete_phrase_silence_seconds: float = 2.5
 
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
-    # Stay conversational after each answer instead of dropping to standby
-    # after only a few seconds. The runtime clamps unsafe extremes.
-    listener_followup_silence_seconds: float = 10.0
-    listener_max_utterance_seconds: float = 45.0
+    listener_followup_silence_seconds: float = 12.0
+    listener_max_utterance_seconds: float = 60.0
     listener_wake_ack_enabled: bool = True
+    listener_activation_phrase: str = "Sì, signore?"
     listener_barge_in_enabled: bool = True
-    listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
-    listener_error_phrase: str = "Mi dispiace signore, ho avuto un problema nell'elaborare la richiesta."
+    listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby|chiudi la sessione"
+    listener_error_phrase: str = "Mi dispiace signore, non ho capito l'ultima parte."
+    listener_unauthorized_phrase: str = "Mi dispiace, non posso eseguire questa richiesta."
+
+    # Lightweight voice identity. The owner may be auto-enrolled from the first
+    # clear command after a verified wake; additional profiles can be added later.
+    speaker_auth_enabled: bool = True
+    speaker_profiles_dir: str = "data/speaker_profiles"
+    speaker_match_threshold: float = 0.78
+    speaker_auto_enroll_owner: bool = True
+    speaker_owner_name: str = "Signore"
+    speaker_owner_role: str = "owner"
+    prosody_enabled: bool = True
+
+    # Anti-echo barge-in. The output reference is compared with mic audio so the
+    # cloned JARVIS voice does not interrupt itself through loudspeakers.
+    echo_guard_enabled: bool = True
+    echo_guard_max_correlation: float = 0.82
+    barge_in_min_rms: float = 0.010
+    barge_in_min_seconds: float = 0.45
+
+    # Continuous screen presence: only the latest frame is kept in RAM. An image
+    # is attached to the LLM only when the request actually refers to the screen.
+    screen_monitor_enabled: bool = True
+    screen_capture_interval_seconds: float = 2.0
+    screen_max_width: int = 1280
+    screen_jpeg_quality: int = 58
+    screen_attach_on_visual_request: bool = True
+
+    # Important proactive alerts only; ordinary observations stay silent.
+    proactive_enabled: bool = True
+    proactive_poll_seconds: float = 15.0
+    proactive_cooldown_seconds: float = 300.0
+    proactive_cpu_percent: float = 97.0
+    proactive_memory_percent: float = 96.0
+    proactive_disk_percent: float = 96.0
+    proactive_gpu_temp_c: float = 88.0
 
     tts_mode: str = "cosyvoice-local"
     cosyvoice_enabled: bool = True
