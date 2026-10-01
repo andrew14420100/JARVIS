@@ -25,6 +25,13 @@ class LMStudioClient:
         "confronta", "ottimizza", "investiga", "diagnostica", "implementa",
         "testa", "github", "browser", "file", "cartella", "sito", "pc",
     )
+    _DEEP_MARKERS = (
+        "dimostra", "dimostrazione", "integrale", "derivata", "equazione",
+        "matematica", "calcola", "debug", "correggi", "implementa", "codice",
+        "architettura", "analizza", "analisi", "ottimizza", "progetta",
+        "pianifica", "confronta", "ricerca", "investiga", "diagnostica",
+        "github", "deploy", "backend", "frontend", "database", "api",
+    )
 
     def __init__(self, base_url: str, timeout_seconds: float = 120.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -55,8 +62,6 @@ class LMStudioClient:
         preferred = cls._normalize_model_name(preferred_model)
         if not loaded or not preferred:
             return False
-        # LM Studio/llama.cpp commonly append quantization/container suffixes
-        # such as GGUF, Q4_K_M or FP8 to the canonical model id.
         return loaded == preferred or preferred in loaded or loaded in preferred
 
     @staticmethod
@@ -69,14 +74,6 @@ class LMStudioClient:
         return [str(item).strip() for item in preferred_models if str(item).strip()]
 
     def resolve_best_model(self, preferred_models: str | Iterable[str] | None = None) -> str:
-        """Pick the first configured model that is actually available.
-
-        The priority is intentionally supplied by configuration instead of being
-        hard-coded into the client. This lets JARVIS keep many optional open
-        models installed while loading/serving only the ones the machine can
-        currently afford. Missing models are skipped without making the whole
-        voice runtime fail.
-        """
         models = self.list_models()
         if not models:
             raise LMStudioError("Nessun modello caricato in LM Studio.")
@@ -97,8 +94,50 @@ class LMStudioClient:
     def _latest_user_text(messages: list[dict[str, Any]]) -> str:
         for message in reversed(messages):
             if message.get("role") == "user":
-                return str(message.get("content") or "").strip().lower()
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content.strip().lower()
         return ""
+
+    @classmethod
+    def _is_fast_voice_turn(
+        cls,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        if tools:
+            return False
+        text = cls._latest_user_text(messages)
+        if not text:
+            return False
+        words = text.split()
+        if len(words) > 32:
+            return False
+        return not any(marker in text for marker in cls._DEEP_MARKERS)
+
+    @classmethod
+    def _prepare_messages_for_latency(
+        cls,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        fast = cls._is_fast_voice_turn(messages, tools)
+        if not fast or "qwen" not in cls._normalize_model_name(model):
+            return messages, fast
+
+        # Qwen's soft switch disables long hidden reasoning for the current turn.
+        # Work on a shallow copy so the permanent conversation transcript remains
+        # clean and never stores the control token.
+        prepared = [dict(message) for message in messages]
+        for index in range(len(prepared) - 1, -1, -1):
+            if prepared[index].get("role") != "user":
+                continue
+            content = prepared[index].get("content")
+            if isinstance(content, str) and "/no_think" not in content:
+                prepared[index]["content"] = content.rstrip() + "\n/no_think"
+            break
+        return prepared, fast
 
     def can_stream_chat(
         self,
@@ -106,7 +145,6 @@ class LMStudioClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> bool:
-        """Stream ordinary chat; keep likely tool turns on the guarded path."""
         if not tools:
             return True
         text = self._latest_user_text(messages)
@@ -138,12 +176,16 @@ class LMStudioClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.4,
     ) -> Iterator[str]:
+        prepared_messages, fast_turn = self._prepare_messages_for_latency(model, messages)
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": prepared_messages,
             "temperature": temperature,
             "stream": True,
         }
+        if fast_turn:
+            payload["max_tokens"] = 220
+
         produced = False
         try:
             with self._client.stream(
@@ -189,11 +231,14 @@ class LMStudioClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]:
+        prepared_messages, fast_turn = self._prepare_messages_for_latency(model, messages, tools)
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": prepared_messages,
             "temperature": temperature,
         }
+        if fast_turn:
+            payload["max_tokens"] = 220
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
