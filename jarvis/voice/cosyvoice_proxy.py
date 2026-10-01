@@ -218,6 +218,7 @@ class CosyVoiceProxyTTS:
             if part:
                 segments.append(part)
         return segments or [clean]
+
     def _buffer_segment(self, text: str) -> bytes:
         pcm = b"".join(self.stream_pcm(text))
         if len(pcm) % 2:
