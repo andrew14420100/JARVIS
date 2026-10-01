@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     wake_threshold: float = 0.35
     wake_chunk_size: int = 1280
 
+    # Primary desktop STT. NVIDIA Nemotron 3.5 uses the local NeMo-Speech.cpp
+    # realtime websocket; faster-whisper remains the automatic fallback.
+    stt_backend: str = "nvidia-realtime"
+    nvidia_asr_http_url: str = "http://127.0.0.1:8080"
+    nvidia_asr_websocket_url: str = "ws://127.0.0.1:8080/v1/audio/transcriptions/realtime"
+    nvidia_asr_language: str = "it-IT"
+    nvidia_asr_endpointing_ms: int = 420
+
     stt_model: str = "small"
     stt_device: str = "auto"
     # RTX-class CUDA GPUs are considerably faster with float16 than plain int8.
@@ -65,7 +73,7 @@ class Settings(BaseSettings):
 
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
-    listener_followup_silence_seconds: float = 8.0
+    listener_followup_silence_seconds: float = 3.0
     listener_max_utterance_seconds: float = 45.0
     listener_wake_ack_enabled: bool = True
     listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
