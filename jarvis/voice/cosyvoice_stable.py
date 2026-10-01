@@ -87,6 +87,11 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
             super().speak_text_stream(tracking())
             return
         except Exception as exc:
+            # stop() is used for intentional barge-in. In that case replaying
+            # the answer through /tts would make JARVIS talk again immediately
+            # after the user interrupted it.
+            if self._interrupt.is_set():
+                return
             print(f"[TTS] bistream degradato, fallback stream standard: {exc}")
 
         # Finish consuming the LLM stream so an audio error never truncates the
