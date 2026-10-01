@@ -12,10 +12,7 @@ VOICE_SOURCE = ROOT / "custom" / "jarvis_reference.mp3"
 
 VOICE_REFERENCE_TEXT = (
     "Ciao, che fai? Buongiorno signore, ho terminato il controllo dei sistemi. "
-    "Per il momento non risulta nulla di urgente. Direi che possiamo riprendere "
-    "con calma da dove avevamo lasciato. Naturalmente, se preferisce occuparsi "
-    "prima di qualcos'altro, mi adeguo. Ah, e questa volta cercherò di evitare "
-    "sorprese. Almeno quelle evitabili."
+    "Per il momento non risulta nulla di urgente."
 )
 
 _VALUE_FLAGS = (
