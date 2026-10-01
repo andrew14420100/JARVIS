@@ -12,16 +12,8 @@ const common = {
   legalComments: 'none'
 };
 
-await build({
-  ...common,
-  entryPoints: ['src/webview/brain-grid.js'],
-  outfile: 'media/brain-grid.bundle.js'
-});
+await build({ ...common, entryPoints: ['src/webview/reactor.js'], outfile: 'media/reactor.bundle.js' });
+await build({ ...common, entryPoints: ['src/webview/brain-grid.js'], outfile: 'media/brain-grid.bundle.js' });
+await build({ ...common, entryPoints: ['src/webview/radar.js'], outfile: 'media/radar.bundle.js' });
 
-await build({
-  ...common,
-  entryPoints: ['src/webview/radar.js'],
-  outfile: 'media/radar.bundle.js'
-});
-
-console.log('JARVIS webviews compiled.');
+console.log('JARVIS reactor, brain grid and radar compiled.');
