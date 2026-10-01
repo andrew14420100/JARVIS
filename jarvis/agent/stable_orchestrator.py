@@ -7,12 +7,7 @@ from jarvis.core.state import JarvisState
 
 
 class StableJarvisOrchestrator(JarvisOrchestrator):
-    """Realtime-safe orchestrator.
-
-    Keeps the live prompt bounded during long conversations, preserves valid
-    history when speech is interrupted, and degrades gracefully when a live
-    provider stream fails instead of crashing the entire desktop voice loop.
-    """
+    """Realtime-safe orchestrator for natural desktop voice conversation."""
 
     def _trim_history(self) -> None:
         limit = max(8, int(getattr(self.settings, "conversation_max_messages", 32)))
@@ -23,10 +18,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         start = max(0, len(rest) - limit)
         while start < len(rest) and rest[start].get("role") != "user":
             start += 1
-        if start >= len(rest):
-            tail = rest[-limit:]
-        else:
-            tail = rest[start:]
+        tail = rest[-limit:] if start >= len(rest) else rest[start:]
         self.messages = [system, *tail]
 
     def start_session(self, *, local_time: str = "", locale: str = "it-IT") -> str:
@@ -39,6 +31,53 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         reply = super().process_message(text, ambient_context=ambient_context)
         self._trim_history()
         return reply
+
+    def _chat_stream(self, request_messages: list[dict]) -> Iterator[str]:
+        """Use local Qwen first for ordinary speech, cloud as immediate fallback.
+
+        Tool-bearing and deep-agent turns never enter this method because the
+        guarded path is selected before streaming. This keeps NVIDIA/cloud
+        available for complex work while removing network latency from normal
+        back-and-forth conversation when LM Studio is already running.
+        """
+        prefer_local = bool(getattr(self.settings, "conversation_local_first", True))
+        local = getattr(self.client, "_local_fallback", None) if prefer_local else None
+
+        if local is not None:
+            emitted = False
+            try:
+                local_model = getattr(self, "_conversation_local_model", "")
+                if not local_model:
+                    local_model = local.resolve_model("")
+                    self._conversation_local_model = local_model
+                for chunk in local.chat_completion_stream(
+                    model=local_model,
+                    messages=request_messages,
+                    temperature=0.4,
+                ):
+                    if not chunk:
+                        continue
+                    if not emitted:
+                        if hasattr(self.client, "last_provider"):
+                            self.client.last_provider = "lmstudio-local-realtime"
+                        if hasattr(self.client, "last_model"):
+                            self.client.last_model = local_model
+                    emitted = True
+                    yield chunk
+                if emitted:
+                    return
+            except Exception as exc:
+                if emitted:
+                    raise
+                self.last_reasoning["local_stream_error"] = str(exc)
+                self._conversation_local_model = ""
+
+        stream_method = getattr(self.client, "chat_completion_stream")
+        yield from stream_method(
+            model=self.model,
+            messages=request_messages,
+            temperature=0.4,
+        )
 
     def process_message_stream(self, text: str, *, ambient_context: str = "") -> Iterator[str]:
         self._trim_history()
@@ -87,11 +126,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
 
         chunks: list[str] = []
         try:
-            for chunk in stream_method(
-                model=self.model,
-                messages=request_messages,
-                temperature=0.4,
-            ):
+            for chunk in self._chat_stream(request_messages):
                 if not chunk:
                     continue
                 chunks.append(chunk)
@@ -128,17 +163,11 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
             self.last_reasoning["stream_error"] = str(exc)
 
             if partial:
-                # A provider dying after first audio must not kill the whole
-                # conversation. Preserve exactly what the user already heard,
-                # return to IDLE, and let the next turn continue normally.
                 self.messages.append({"role": "assistant", "content": partial})
                 self._trim_history()
                 self.set_state(JarvisState.IDLE)
                 return
 
-            # Nothing was emitted yet: remove the provisional user message and
-            # retry once through the guarded/non-streaming path, which can use
-            # the client's provider fallback logic without duplicating history.
             if (
                 self.messages
                 and self.messages[-1].get("role") == "user"
@@ -153,4 +182,3 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
                 raise
             if reply:
                 yield reply
-            return
