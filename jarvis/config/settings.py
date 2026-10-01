@@ -8,7 +8,6 @@ class Settings(BaseSettings):
     """Runtime configuration for JARVIS.
 
     Values can be overridden with environment variables prefixed by JARVIS_.
-    The default AI brain is cloud-hosted and restricted to free routes only.
     Heavy local voice/cognitive components remain optional.
     """
 
@@ -30,9 +29,11 @@ class Settings(BaseSettings):
     cloud_app_name: str = "JARVIS"
     cloud_app_url: str = ""
 
-    # Local Qwen in LM Studio can act as an offline fallback for cloud mode.
+    # Local Qwen in LM Studio is the low-latency conversational path. Cloud
+    # providers stay available for guarded/tool-heavy turns and as fallbacks.
     lm_studio_base_url: str = "http://127.0.0.1:1234/v1"
     lm_studio_fallback_enabled: bool = True
+    conversation_local_first: bool = True
 
     openjarvis_enabled: bool = False
     openjarvis_agent: str = "orchestrator"
@@ -44,8 +45,7 @@ class Settings(BaseSettings):
     memory_db_path: str = "data/jarvis_memory.sqlite3"
     memory_top_k: int = 4
 
-    # Keep the live prompt bounded. The voice runtime also compacts completed
-    # turns so long sessions do not become progressively slower.
+    # Keep the live prompt bounded so long voice sessions do not slow down.
     conversation_max_messages: int = 32
 
     presence_enabled: bool = False
@@ -54,21 +54,23 @@ class Settings(BaseSettings):
     presence_max_chars: int = 5000
 
     voice_enabled: bool = False
-    # Optional sounddevice input selector. Leave blank for the Windows default,
-    # or set an exact/unique device name such as "Microfono (USB ...)".
     audio_input_device: str = ""
     wake_model: str = "hey_jarvis"
-    # openWakeWord's bundled models are tuned around 0.5. Keeping the real gate
-    # here avoids normal speech activating the previous ~0.16 soft path.
-    wake_threshold: float = 0.50
+    # The user's real wake samples peak around 0.31. The old 0.50 gate missed
+    # them; the previous ~0.16 soft path was too permissive. 0.28 plus an RMS
+    # gate is a practical middle ground and remains configurable in .env.
+    wake_threshold: float = 0.28
     wake_min_rms: float = 0.004
     wake_chunk_size: int = 1280
 
     stt_model: str = "small"
     stt_device: str = "auto"
-    # RTX-class CUDA GPUs are considerably faster with float16 than plain int8.
     stt_compute_type: str = "float16"
     stt_language: str = "it"
+    # End-of-turn latency after the user stops speaking. 420 ms is fast enough
+    # for natural back-and-forth without cutting ordinary short pauses as often
+    # as the former 360 ms endpoint.
+    stt_silence_seconds: float = 0.42
 
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
