@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generator
 
 import httpx
 
@@ -353,6 +353,126 @@ class CloudAIClient:
         self.last_error = " | ".join(errors)
         raise CloudAIError(
             "Tutti i cervelli AI gratuiti configurati sono temporaneamente non disponibili. "
+            f"Dettagli: {self.last_error}"
+        )
+
+
+    def _request_provider_stream(
+        self,
+        provider: CloudProvider,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Yield text deltas from one OpenAI-compatible provider."""
+        payload: dict[str, Any] = {
+            "model": provider.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+            "max_tokens": 128,
+        }
+        if provider.extra_body:
+            payload.update(provider.extra_body)
+        # Voice chat must start speaking immediately. Do not spend the turn
+        # budget on a hidden reasoning trace.
+        if provider.supports_dynamic_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        response = self._client.stream(
+            "POST",
+            f"{provider.base_url}/chat/completions",
+            headers=self._headers(provider),
+            json=payload,
+        )
+        try:
+            response.raise_for_status()
+            full_content = ""
+            for raw in response.iter_lines():
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except (TypeError, ValueError):
+                    continue
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                text = str(delta.get("content") or "")
+                if text:
+                    full_content += text
+                    yield {"type": "delta", "text": text}
+            yield {"type": "done", "content": full_content, "tool_calls": []}
+        finally:
+            response.close()
+
+    def chat_completion_stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.35,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Stream ordinary conversational replies with no tool round-trip.
+
+        Tool/action turns continue through the guarded orchestrator path. This
+        method is deliberately optimized for natural voice conversation.
+        """
+        del model
+        providers = self._configured_or_raise()
+        errors: list[str] = []
+
+        for index, provider in enumerate(providers):
+            emitted = False
+            try:
+                for event in self._request_provider_stream(
+                    provider,
+                    messages=messages,
+                    temperature=temperature,
+                ):
+                    if event.get("type") == "delta" and event.get("text"):
+                        emitted = True
+                    yield event
+                self.last_provider = provider.name
+                self.last_model = provider.model
+                self.last_error = ""
+                return
+            except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
+                errors.append(f"{provider.name}: {exc}")
+                if emitted:
+                    raise
+
+            if index == 0 and provider.name == "nvidia-free" and self._local_fallback_enabled:
+                emitted = False
+                try:
+                    if self._local_fallback is None:
+                        raise LMStudioError("Fallback locale LM Studio disabilitato.")
+                    local_model = self._local_fallback.resolve_model("")
+                    for event in self._local_fallback.chat_completion_stream(
+                        model=local_model,
+                        messages=messages,
+                        temperature=temperature,
+                    ):
+                        if event.get("type") == "delta" and event.get("text"):
+                            emitted = True
+                        yield event
+                    self.last_provider = "lmstudio-local-fallback"
+                    self.last_model = local_model
+                    self.last_error = " | ".join(errors)
+                    return
+                except (LMStudioError, ValueError, KeyError, IndexError) as exc:
+                    errors.append(f"lmstudio-local-fallback: {exc}")
+                    if emitted:
+                        raise
+
+        self.last_error = " | ".join(errors)
+        raise CloudAIError(
+            "Nessun provider AI disponibile per lo streaming vocale. "
             f"Dettagli: {self.last_error}"
         )
 
