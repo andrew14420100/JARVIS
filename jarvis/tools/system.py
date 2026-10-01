@@ -135,18 +135,40 @@ def show_notification(title: str, message: str) -> dict[str, object]:
 
 
 _timers: list[threading.Timer] = []
+_timers_lock = threading.RLock()
 
 
 def set_timer(seconds: int, message: str = "Timer completato") -> dict[str, object]:
     seconds = max(1, min(int(seconds), 7 * 24 * 3600))
+    timer_ref: dict[str, threading.Timer] = {}
 
     def callback() -> None:
-        show_notification("JARVIS", message)
+        try:
+            show_notification("JARVIS", message)
+        finally:
+            timer = timer_ref.get("timer")
+            if timer is not None:
+                with _timers_lock:
+                    try:
+                        _timers.remove(timer)
+                    except ValueError:
+                        pass
 
     timer = threading.Timer(seconds, callback)
     timer.daemon = True
-    timer.start()
-    _timers.append(timer)
+    timer_ref["timer"] = timer
+    with _timers_lock:
+        _timers[:] = [item for item in _timers if item.is_alive()]
+        _timers.append(timer)
+    try:
+        timer.start()
+    except Exception:
+        with _timers_lock:
+            try:
+                _timers.remove(timer)
+            except ValueError:
+                pass
+        raise
     return {"success": True, "seconds": seconds, "message": message}
 
 
