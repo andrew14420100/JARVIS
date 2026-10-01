@@ -80,9 +80,16 @@ def main() -> None:
     # Everything below the warm-up remains inside main(). The previous core
     # upgrade accidentally dedented this section, causing Python to exit with
     # code 0 immediately after Whisper loaded.
-    agent = get_orchestrator()
+    print("[JARVIS] Inizializzo cervello e motore conversazionale...", flush=True)
+    try:
+        agent = get_orchestrator()
+    except SystemExit as exc:
+        raise RuntimeError(
+            f"Il cervello ha terminato l'avvio inaspettatamente (SystemExit={exc.code!r})."
+        ) from exc
     event_bus = EventBus()
     router = JarvisRouter()
+    print("[JARVIS] Cervello pronto · voice engine in inizializzazione...", flush=True)
 
     engine = VoiceConversationEngine(
         settings=settings,
@@ -126,7 +133,15 @@ def main() -> None:
     print("[JARVIS] Ctrl+C per uscire.")
 
     try:
-        engine.run()
+        while True:
+            engine.run()
+            # A normal desktop session should remain inside the wake loop. If
+            # the audio loop returns unexpectedly, restart it instead of
+            # silently returning to PowerShell with exit code 0.
+            print("[JARVIS] Voice engine terminato; riavvio automatico...", flush=True)
+            if engine.busy.is_set():
+                engine.interrupt()
+            time.sleep(0.25)
     except KeyboardInterrupt:
         pass
     finally:
