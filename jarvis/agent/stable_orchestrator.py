@@ -70,7 +70,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
                         continue
                     if not emitted:
                         if hasattr(self.client, "last_provider"):
-                            self.client.last_provider = "local-open-model-pool"
+                            self.client.last_provider = "lmstudio-local-realtime"
                         if hasattr(self.client, "last_model"):
                             self.client.last_model = local_model
                     emitted = True
