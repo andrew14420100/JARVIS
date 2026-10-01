@@ -12,20 +12,28 @@ from jarvis.core.router import JarvisRouter
 from jarvis.core.state import JarvisState
 
 
-_MARKDOWN_RE = re.compile(r"(\*\*|__|\*|_|~~|\x60{1,3}|^\s*[-*•]\s+|^\s*#{1,6}\s+)", re.MULTILINE)
+# Voice output must never read formatting intended for a screen.
+_MARKDOWN_RE = re.compile(
+    r"(\*\*|__|\*|~~|\x60{1,3}|^\s*[-*•]\s+|^\s*#{1,6}\s+)",
+    re.MULTILINE,
+)
+_THINK_RE = re.compile(r"<(?:think|analysis)>.*?</(?:think|analysis)>", re.IGNORECASE | re.DOTALL)
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|(?<=[;:])\s+")
 _WS_RE = re.compile(r"\s+")
 
 
 def clean_voice_text(text: str) -> str:
+    """Convert model text into speech-safe natural language."""
     text = str(text or "")
+    text = _THINK_RE.sub(" ", text)
     text = _LINK_RE.sub(r"\1", text)
     text = text.replace("\x60\x60\x60", " ").replace("\n", " ")
     text = _MARKDOWN_RE.sub(" ", text)
+    # Tables, bullets and code separators have no useful spoken representation.
+    text = re.sub(r"(?<!\w)[|]+(?!\w)", " ", text)
     text = text.replace("•", " ")
-    text = _WS_RE.sub(" ", text).strip()
-    return text
+    return _WS_RE.sub(" ", text).strip(" \t\r\n*-_~|")
 
 
 def split_voice_sentences(text: str) -> list[str]:
@@ -54,12 +62,27 @@ def _speech_profile(audio, sample_rate: int = 16000) -> tuple[bool, float, float
 
     peak = max(rms_values)
     noise = float(np.percentile(np.asarray(rms_values, dtype=np.float32), 30))
-    threshold = max(0.0012, noise * 2.5)
+    threshold = max(0.0010, noise * 2.2)
     voiced = sum(value >= threshold for value in rms_values)
     return voiced >= 2 and peak >= threshold, peak, noise, threshold
 
 
 class VoiceConversationEngine:
+    """Low-latency local voice turn manager.
+
+    The wake detector owns the microphone while asleep. Once JARVIS wakes,
+    only post-wake audio is passed to STT. Normal conversation uses streamed
+    LLM output and sentence-level CosyVoice playback so generation and speech
+    overlap instead of waiting for the complete answer.
+    """
+
+    # Keep the turn short enough to feel conversational. A longer pause is
+    # handled by the normal follow-up timeout, not by every first turn.
+    FIRST_TURN_INITIAL_SILENCE = 0.90
+    FOLLOWUP_INITIAL_SILENCE = 2.0
+    END_SILENCE = 0.28
+    MAX_VOICE_SEGMENT = 62
+
     def __init__(
         self,
         *,
@@ -111,9 +134,9 @@ class VoiceConversationEngine:
         started = time.monotonic()
         audio = self.stt.record_until_silence(
             initial_silence_seconds=initial_silence_seconds,
-            silence_seconds=0.24,
-            speech_threshold=0.00090,
-            silence_threshold=0.00050,
+            silence_seconds=self.END_SILENCE,
+            speech_threshold=0.00075,
+            silence_threshold=0.00045,
             max_seconds=max_seconds,
         )
         capture_seconds = time.monotonic() - started
@@ -166,7 +189,8 @@ class VoiceConversationEngine:
                 sentence = sentence_queue.get()
                 if sentence is None:
                     return
-                if sentence.strip():
+                sentence = clean_voice_text(sentence)
+                if sentence:
                     yield sentence
 
         try:
@@ -179,10 +203,26 @@ class VoiceConversationEngine:
                         break
                     self.tts.speak(sentence, streamed=True)
         except Exception as exc:
-            print(f"[JARVIS] TTS non disponibile: {exc}")
+            if not self._turn_cancel.is_set():
+                print(f"[JARVIS] TTS non disponibile: {exc}")
+
+    def _queue_natural_chunk(self, sentence_queue: queue.Queue[str | None], text: str) -> str:
+        """Flush a long unfinished clause at a word boundary."""
+        clean = clean_voice_text(text)
+        if len(clean) <= self.MAX_VOICE_SEGMENT:
+            return clean
+
+        cut = clean.rfind(" ", 0, self.MAX_VOICE_SEGMENT + 1)
+        if cut < 24:
+            return clean
+
+        first = clean[:cut].strip()
+        if first:
+            sentence_queue.put(first)
+        return clean[cut:].strip()
 
     def _stream_general_reply(self, text: str, ambient_context: str) -> str:
-        sentence_queue: queue.Queue[str | None] = queue.Queue(maxsize=4)
+        sentence_queue: queue.Queue[str | None] = queue.Queue(maxsize=6)
         self._turn_cancel.clear()
         self._tts_thread = threading.Thread(
             target=self._speak_stream,
@@ -195,6 +235,7 @@ class VoiceConversationEngine:
         full: list[str] = []
         pending = ""
         started = time.monotonic()
+        first_audio_boundary = False
 
         try:
             for event in self.agent.process_message_stream(
@@ -206,8 +247,6 @@ class VoiceConversationEngine:
                 if event.get("type") != "delta":
                     continue
 
-                # Keep the raw streaming whitespace. Cleaning each token
-                # independently would turn "ciao " + "come" into "ciaocome".
                 delta = str(event.get("text") or "")
                 if not delta:
                     continue
@@ -218,19 +257,26 @@ class VoiceConversationEngine:
                 parts = split_voice_sentences(pending)
                 if len(parts) > 1:
                     for sentence in parts[:-1]:
-                        sentence_queue.put(sentence)
+                        if sentence:
+                            sentence_queue.put(sentence)
+                            first_audio_boundary = True
                     pending = parts[-1]
 
-                if len(pending) >= 90:
-                    sentence_queue.put(pending)
-                    pending = ""
+                # If the model does not emit punctuation for a while, start
+                # speaking at a natural word boundary rather than waiting for
+                # the complete answer.
+                if not first_audio_boundary and len(pending) >= 42:
+                    pending = self._queue_natural_chunk(sentence_queue, pending)
+                    first_audio_boundary = True
+                elif first_audio_boundary and len(pending) >= self.MAX_VOICE_SEGMENT:
+                    pending = self._queue_natural_chunk(sentence_queue, pending)
 
             if pending.strip() and not self._turn_cancel.is_set():
                 sentence_queue.put(clean_voice_text(pending))
 
             sentence_queue.put(None)
             if self._tts_thread is not None:
-                self._tts_thread.join(timeout=30)
+                self._tts_thread.join(timeout=45)
 
             reply = clean_voice_text("".join(full))
             print(f"[LATENCY] risposta_stream={time.monotonic() - started:.2f}s")
@@ -242,22 +288,55 @@ class VoiceConversationEngine:
                 pass
             raise
 
+    def _speak_quick_ack(self, text: str) -> threading.Thread | None:
+        if not self.tts_ready or not text:
+            return None
+
+        def run() -> None:
+            try:
+                self.agent.set_state(JarvisState.SPEAKING)
+                self.tts.speak(text, streamed=True)
+            except Exception as exc:
+                print(f"[JARVIS] ACK vocale non disponibile: {exc}")
+
+        thread = threading.Thread(target=run, daemon=True, name="jarvis-quick-ack")
+        thread.start()
+        return thread
+
     def _answer(self, text: str) -> str:
         print(f"TU: {text}")
         intent = self.router.classify(text)
-        self.event_bus.emit(JarvisEvent("USER_COMMAND", {"text": text, "intent": intent}))
+        self.event_bus.emit(
+            JarvisEvent("USER_COMMAND", {"text": text, "intent": intent})
+        )
         print(f"[CORE] Intent rilevato: {intent}")
 
         context = self.presence.as_context() if self.settings.presence_enabled else ""
         started = time.monotonic()
 
-        if intent == "general" and callable(getattr(self.agent, "process_message_stream", None)):
+        if intent == "general" and callable(
+            getattr(self.agent, "process_message_stream", None)
+        ):
             reply = self._stream_general_reply(text, context)
         else:
-            reply = clean_voice_text(
-                self.agent.process_message(text, ambient_context=context)
+            # For real actions, give the user immediate audio feedback while
+            # the guarded tool/orchestrator work happens in parallel.
+            ack = self._speak_quick_ack(
+                "Controllo." if intent == "system" else "Procedo."
             )
-            if self.tts_ready and reply:
+            try:
+                reply = clean_voice_text(
+                    self.agent.process_message(text, ambient_context=context)
+                )
+            finally:
+                if ack is not None:
+                    try:
+                        self.tts.stop()
+                    except Exception:
+                        pass
+                    ack.join(timeout=1.0)
+
+            if self.tts_ready and reply and not self._turn_cancel.is_set():
                 self.agent.set_state(JarvisState.SPEAKING)
                 self.tts.speak(reply, streamed=True)
 
@@ -281,8 +360,10 @@ class VoiceConversationEngine:
 
         try:
             self.wake.pause()
-            time.sleep(0.10)
-            post = self.wake.post_wake_audio(seconds=0.34, exclude_head_seconds=0.12)
+            time.sleep(0.06)
+
+            # Only audio after the wake trigger can reach Whisper.
+            post = self.wake.post_wake_audio(seconds=0.42, exclude_head_seconds=0.12)
             continued, peak, noise, threshold = _speech_profile(post)
 
             print("[JARVIS] Ti ascolto...")
@@ -292,23 +373,34 @@ class VoiceConversationEngine:
                     f"peak={peak:.4f} noise={noise:.4f} soglia={threshold:.4f}"
                 )
                 text = self._capture(
-                    initial_silence_seconds=0.45,
-                    max_seconds=min(self.settings.listener_max_utterance_seconds, 16.0),
+                    initial_silence_seconds=0.35,
+                    max_seconds=min(self.settings.listener_max_utterance_seconds, 14.0),
                     activation_audio=post,
                     activation_has_speech=True,
                 )
             else:
                 print(
                     "[JARVIS] Wake isolata · "
-                    f"peak={peak:.4f} noise={noise:.4f} soglia={threshold:.4f}"
+                    f"peak={peak:.4f} noise={noise:.4f} soglia={threshold:.4f} · "
+                    "wake esclusa da Whisper"
                 )
-                if self.settings.listener_wake_ack_enabled and self.tts_ready:
-                    self.tts.speak("Sì?", streamed=True)
-                print("[JARVIS] In ascolto del comando...")
+                # Do not force a spoken "Sì?" before every command. That pause
+                # is one of the biggest sources of the artificial feeling.
                 text = self._capture(
-                    initial_silence_seconds=2.2,
-                    max_seconds=min(self.settings.listener_max_utterance_seconds, 16.0),
+                    initial_silence_seconds=self.FIRST_TURN_INITIAL_SILENCE,
+                    max_seconds=min(self.settings.listener_max_utterance_seconds, 14.0),
                 )
+
+                # If the user really only woke JARVIS, give the natural
+                # acknowledgement and open a second, slightly longer window.
+                if not text:
+                    if self.settings.listener_wake_ack_enabled and self.tts_ready:
+                        self.tts.speak("Sì?", streamed=True)
+                    print("[JARVIS] In ascolto del comando...")
+                    text = self._capture(
+                        initial_silence_seconds=1.55,
+                        max_seconds=min(self.settings.listener_max_utterance_seconds, 14.0),
+                    )
 
             if not text:
                 print("[JARVIS] Nessun comando rilevato.")
@@ -320,9 +412,10 @@ class VoiceConversationEngine:
                 print("[JARVIS] Conversazione attiva · ascolto...")
                 followup = self._capture(
                     initial_silence_seconds=min(
-                        self.settings.listener_followup_silence_seconds, 4.0
+                        self.settings.listener_followup_silence_seconds,
+                        self.FOLLOWUP_INITIAL_SILENCE,
                     ),
-                    max_seconds=min(self.settings.listener_max_utterance_seconds, 20.0),
+                    max_seconds=min(self.settings.listener_max_utterance_seconds, 18.0),
                 )
                 if not followup:
                     print("[JARVIS] Standby.")
