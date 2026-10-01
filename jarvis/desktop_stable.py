@@ -5,6 +5,15 @@ from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
 
 
 def main() -> None:
+    # This runtime must always use the user's cloned local JARVIS voice.
+    # If CosyVoice is unavailable we prefer silence + a clear diagnostic over
+    # silently changing to another speaker/voice provider.
+    jarvis_app.settings.tts_mode = "cosyvoice-local"
+    jarvis_app.settings.cosyvoice_enabled = True
+    jarvis_app.settings.cloud_tts_enabled = False
+    jarvis_app.settings.cloud_tts_fallback_enabled = False
+    jarvis_app.settings.tts_enabled = True
+
     # Share one hardened orchestrator between the desktop voice loop and FastAPI.
     if jarvis_app.orchestrator is None or not isinstance(
         jarvis_app.orchestrator, StableJarvisOrchestrator
