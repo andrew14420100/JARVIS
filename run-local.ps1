@@ -142,7 +142,7 @@ if ((Test-Path $voiceAudio) -and (Test-Path $voiceText) -and (Test-Path $cosyRep
     Write-Host "Servono private\voices\jarvis.wav e private\voices\jarvis.txt, oltre al modello CosyVoice."
 }
 
-Write-Host "[7/7] Avvio JARVIS..."
+Write-Host "[7/7] Avvio JARVIS realtime..."
 $brainMode = "cloud"
 if (Test-Path ".env") {
     $brainLine = Get-Content ".env" | Where-Object { $_ -match '^JARVIS_BRAIN_MODE=' } | Select-Object -Last 1
@@ -151,10 +151,10 @@ if (Test-Path ".env") {
     }
 }
 if ($brainMode -eq "local") {
-    Write-Host "Cervello AI: LM Studio locale su http://127.0.0.1:1234/v1"
+    Write-Host "Cervello AI: LM Studio locale su http://127.0.0.1:1234/v1 · streaming ON"
     Write-Host "Voce/STT/wake word/memoria/tool: locali."
 } else {
-    Write-Host "Cervello AI: router cloud gratuito configurato nel file .env."
+    Write-Host "Cervello AI: router cloud gratuito con fallback LM Studio streaming."
     Write-Host "JARVIS non seleziona automaticamente modelli AI a pagamento."
 }
-& $python -m jarvis.desktop
+& $python -m jarvis.desktop_stable
