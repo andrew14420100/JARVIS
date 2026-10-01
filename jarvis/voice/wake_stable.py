@@ -32,6 +32,9 @@ class WakeWordListener(_BaseWakeWordListener):
         *,
         conversation_active: Callable[[], bool] | None = None,
         speech_interrupt: Callable[[Any], bool] | None = None,
+        standby_soft_activation: Callable[[Any], bool] | None = None,
+        soft_activation_threshold: float = 0.18,
+        soft_activation_consecutive: int = 2,
         barge_in_min_rms: float = 0.010,
         barge_in_min_seconds: float = 0.45,
         echo_guard_enabled: bool = True,
@@ -50,17 +53,36 @@ class WakeWordListener(_BaseWakeWordListener):
         last_candidate_log = 0.0
         diagnostic_floor = max(0.10, min(self.threshold * 0.55, self.threshold - 0.05))
         selected_device = self._select_working_input_device(sd)
+        soft_threshold = max(0.10, min(float(soft_activation_threshold), self.threshold - 0.01))
+        soft_needed = max(2, int(soft_activation_consecutive))
+        soft_hits = 0
 
         speech_frames: list[Any] = []
         speech_samples = 0
         required_samples = max(self.chunk_size * 3, int(self.sample_rate * max(0.25, barge_in_min_seconds)))
         speech_rms_gate = max(self.min_rms * 2.0, float(barge_in_min_rms))
 
+        def launch_callback() -> bool:
+            if callback_lock.locked():
+                return False
+
+            def invoke() -> None:
+                with callback_lock:
+                    callback()
+
+            threading.Thread(
+                target=invoke,
+                daemon=True,
+                name="jarvis-wake-callback",
+            ).start()
+            return True
+
         while not self._stop.is_set():
             if self._pause.is_set():
                 self._stream_released.set()
                 speech_frames.clear()
                 speech_samples = 0
+                soft_hits = 0
                 time.sleep(0.02)
                 continue
 
@@ -89,19 +111,17 @@ class WakeWordListener(_BaseWakeWordListener):
                         now = time.monotonic()
 
                         # During an already-open session, any clear non-echo
-                        # speech may interrupt JARVIS. This is intentionally
-                        # separate from wake-word detection.
+                        # authorized speech may interrupt JARVIS. No wake word is
+                        # required once the session has been activated.
                         active = bool(conversation_active and conversation_active())
                         is_busy = bool(busy and busy())
                         if active and is_busy and speech_interrupt is not None and now >= speech_cooldown_until:
                             if rms >= speech_rms_gate:
                                 speech_frames.append(pcm)
                                 speech_samples += int(pcm.size)
-                            elif speech_frames:
-                                # Permit tiny gaps but reset a weak/noisy attempt.
-                                if speech_samples < required_samples:
-                                    speech_frames.clear()
-                                    speech_samples = 0
+                            elif speech_frames and speech_samples < required_samples:
+                                speech_frames.clear()
+                                speech_samples = 0
                             if speech_samples >= required_samples:
                                 candidate_i16 = np.concatenate(speech_frames)
                                 candidate = candidate_i16.astype(np.float32) / 32768.0
@@ -137,7 +157,8 @@ class WakeWordListener(_BaseWakeWordListener):
                         if not prediction_key_reported:
                             print(
                                 f"[JARVIS] Wake detector: {prediction_key} · "
-                                f"soglia {self.threshold:.2f} · rms minimo {self.min_rms:.4f}"
+                                f"soglia {self.threshold:.2f} · gate Jarvis {soft_threshold:.2f} · "
+                                f"rms minimo {self.min_rms:.4f}"
                             )
                             prediction_key_reported = True
 
@@ -145,10 +166,46 @@ class WakeWordListener(_BaseWakeWordListener):
                             print(f"[WAKE] {prediction_key} score={score:.3f} rms={rms:.4f}")
                             last_candidate_log = now
 
+                        # The official hey_jarvis model sometimes scores bare
+                        # "Jarvis" below its full-phrase threshold. Allow a lower
+                        # gate only in standby, only after two consecutive hits,
+                        # and only when an already-enrolled speaker verifies it.
+                        # This avoids restoring the old unrestricted soft trigger.
+                        if (
+                            not active
+                            and standby_soft_activation is not None
+                            and now >= cooldown_until
+                            and rms >= self.min_rms
+                            and soft_threshold <= score < self.threshold
+                        ):
+                            soft_hits += 1
+                            if soft_hits >= soft_needed:
+                                candidate = self.recent_audio(seconds=1.15, exclude_tail_seconds=0.0)
+                                verified = False
+                                try:
+                                    verified = bool(standby_soft_activation(candidate))
+                                except Exception as exc:
+                                    print(f"[WAKE] gate voce Jarvis fallito: {exc}")
+                                soft_hits = 0
+                                if verified:
+                                    model.reset()
+                                    self.last_wake_rms = rms
+                                    self._start_post_capture([])
+                                    cooldown_until = now + 1.5
+                                    print(
+                                        f"[JARVIS] Attivazione 'Jarvis' autorizzata · "
+                                        f"score={score:.3f} rms={rms:.4f} mode=voice-gated-soft"
+                                    )
+                                    launch_callback()
+                                    continue
+                        elif score < soft_threshold or active:
+                            soft_hits = 0
+
                         if score < self.threshold or rms < self.min_rms:
                             continue
 
                         model.reset()
+                        soft_hits = 0
                         if now < cooldown_until:
                             continue
                         print(
@@ -164,21 +221,10 @@ class WakeWordListener(_BaseWakeWordListener):
                             if interrupt:
                                 interrupt()
                             print("[JARVIS] Barge-in wake: risposta corrente interrotta.")
-
-                        if callback_lock.locked():
-                            continue
-                        if not was_busy:
+                        elif now >= cooldown_until:
                             cooldown_until = now + 1.25
 
-                        def invoke() -> None:
-                            with callback_lock:
-                                callback()
-
-                        threading.Thread(
-                            target=invoke,
-                            daemon=True,
-                            name="jarvis-wake-callback",
-                        ).start()
+                        launch_callback()
             except Exception as exc:
                 if self._stop.is_set() or self._pause.is_set():
                     continue
