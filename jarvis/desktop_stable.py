@@ -5,7 +5,7 @@ from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
 
 
 def main() -> None:
-    # Share one stable orchestrator between the desktop voice loop and FastAPI.
+    # Share one hardened orchestrator between the desktop voice loop and FastAPI.
     if jarvis_app.orchestrator is None or not isinstance(
         jarvis_app.orchestrator, StableJarvisOrchestrator
     ):
@@ -15,14 +15,20 @@ def main() -> None:
             jarvis_app.registry,
         )
 
-    # Import after the shared agent has been installed: desktop.get_orchestrator
-    # will now return the stable instance above.
+    # The real microphone logs showed valid "Hey Jarvis" peaks around 0.31.
+    # Keep the verified threshold below that while still removing the old 0.16
+    # soft-trigger path that caused normal speech / the wake phrase itself to be
+    # mistaken for a user command.
+    jarvis_app.settings.wake_threshold = min(
+        float(getattr(jarvis_app.settings, "wake_threshold", 0.28)),
+        0.28,
+    )
+
+    # Import only after the shared stable agent/settings are installed.
     from jarvis import desktop
 
-    # The wake listener already captures post-wake PCM concurrently. Waiting
-    # 380 ms before handing it to STT was unnecessary and made the assistant
-    # feel sluggish. 140 ms is enough to avoid the trigger tail while retaining
-    # the first words after "Hey Jarvis".
+    # The wake listener captures post-wake PCM concurrently, so the old 380 ms
+    # delay only made first response slower. Keep a short acoustic tail guard.
     desktop.POST_WAKE_CAPTURE_DELAY_SECONDS = 0.14
     desktop.ACOUSTIC_GUARD_SECONDS = 0.18
     desktop.main()
