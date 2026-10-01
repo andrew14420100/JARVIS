@@ -55,8 +55,44 @@ jobs:
           CI: 'true'
         run: npm run build
 
+  voice-ai-endurance:
+    name: Voice + AI endurance x10
+    needs: backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install voice/AI test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install "numpy>=1.26,<3"
+          python -m pip check
+      - name: Run voice and AI suite ten consecutive times
+        shell: bash
+        run: |
+          set -euo pipefail
+          TESTS=(
+            tests/test_voice_ai_endurance.py
+            tests/test_realtime_pipeline.py
+            tests/test_audio_guards.py
+            tests/test_conversation_voice.py
+            tests/test_voice_think_filter.py
+            tests/test_cosyvoice_service.py
+            tests/test_cloud_brain.py
+            tests/test_core_router.py
+            tests/test_local_model_pool.py
+          )
+          for pass in $(seq 1 10); do
+            echo "=== VOICE + AI endurance ${pass}/10 ==="
+            pytest -q "${TESTS[@]}"
+          done
+
   windows-runtime:
-    name: Windows voice/runtime smoke
+    name: Windows voice/runtime smoke x3
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -97,16 +133,27 @@ jobs:
             exit 1
           }
           Write-Host "All PowerShell scripts parsed successfully."
-      - name: Run Windows audio/runtime tests
-        run: >-
-          pytest -q
-          tests/test_audio_guards.py
-          tests/test_conversation_voice.py
-          tests/test_voice_think_filter.py
-          tests/test_persistent_runtime.py
-          tests/test_realtime_pipeline.py
-          tests/test_api_smoke.py
-          tests/test_cosyvoice_service.py
+      - name: Run Windows voice/audio/AI tests three times
+        shell: pwsh
+        run: |
+          $tests = @(
+            'tests/test_voice_ai_endurance.py',
+            'tests/test_audio_guards.py',
+            'tests/test_conversation_voice.py',
+            'tests/test_voice_think_filter.py',
+            'tests/test_persistent_runtime.py',
+            'tests/test_realtime_pipeline.py',
+            'tests/test_api_smoke.py',
+            'tests/test_cosyvoice_service.py',
+            'tests/test_cloud_brain.py',
+            'tests/test_core_router.py',
+            'tests/test_local_model_pool.py'
+          )
+          for ($pass = 1; $pass -le 3; $pass++) {
+            Write-Host "=== WINDOWS VOICE + AI $pass/3 ==="
+            pytest -q $tests
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
   stress:
     name: Repeat suite for state leaks/flakiness
@@ -135,7 +182,7 @@ jobs:
   snapshot:
     name: Tested repository snapshot
     if: github.event_name == 'push'
-    needs: [backend, frontend, windows-runtime, stress]
+    needs: [backend, frontend, voice-ai-endurance, windows-runtime, stress]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tested main
