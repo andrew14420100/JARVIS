@@ -4,6 +4,7 @@
 # Kept separate so Emergent/cloud preview does not install heavy audio/AI packages.
 faster-whisper>=1.1,<2
 openWakeWord>=0.6,<1
+websockets>=15,<17
 # Kokoro is a legacy fallback only. Current 0.9.x wheels require Python <3.13;
 # CosyVoice is the default JARVIS TTS, so Python 3.13 setups must not fail here.
 kokoro>=0.9,<1; python_version < "3.13"
