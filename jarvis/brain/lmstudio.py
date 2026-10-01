@@ -49,6 +49,7 @@ class LMStudioClient:
 
     def __init__(self, base_url: str, timeout_seconds: float = 120.0) -> None:
         self.base_url = base_url.rstrip("/")
+        self.native_base_url = re.sub(r"/v1/?$", "", self.base_url, flags=re.IGNORECASE)
         timeout = httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds))
         self._client = httpx.Client(timeout=timeout)
         self.last_error = ""
@@ -57,14 +58,46 @@ class LMStudioClient:
         self._client.close()
 
     def list_models(self) -> list[str]:
+        """Return only models already resident in memory when LM Studio v1 is available.
+
+        LM Studio can expose downloaded-but-unloaded models from the OpenAI
+        compatible /v1/models endpoint when JIT loading is enabled. Treating
+        those as resident lets a conversational turn trigger a multi-GB model
+        load, producing second-scale stalls and GPU/RAM spikes. The native v1
+        endpoint explicitly exposes loaded_instances, so prefer it and return
+        only those instances. Fall back to the legacy OpenAI list only for older
+        LM Studio versions that do not expose /api/v1/models.
+        """
+        native_error: Exception | None = None
+        try:
+            response = self._client.get(f"{self.native_base_url}/api/v1/models")
+            response.raise_for_status()
+            payload = response.json()
+            resident: list[str] = []
+            for item in payload.get("models", []):
+                if item.get("type") != "llm":
+                    continue
+                key = str(item.get("key") or "").strip()
+                for instance in item.get("loaded_instances") or []:
+                    instance_id = str(instance.get("id") or key).strip()
+                    if instance_id and instance_id not in resident:
+                        resident.append(instance_id)
+            self.last_error = ""
+            return resident
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            native_error = exc
+
         try:
             response = self._client.get(f"{self.base_url}/models")
             response.raise_for_status()
             payload = response.json()
-            return [item["id"] for item in payload.get("data", []) if item.get("id")]
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            models = [item["id"] for item in payload.get("data", []) if item.get("id")]
+            self.last_error = ""
+            return models
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             self.last_error = str(exc)
-            raise LMStudioError(f"Impossibile leggere i modelli da LM Studio: {exc}") from exc
+            detail = native_error or exc
+            raise LMStudioError(f"Impossibile leggere i modelli da LM Studio: {detail}") from exc
 
     @staticmethod
     def _normalize_model_name(value: str) -> str:
@@ -129,22 +162,12 @@ class LMStudioClient:
             return False
         if any(marker in text for marker in cls._DEEP_MARKERS):
             return False
-        # Long-term-memory questions keep the full context path. Ordinary
-        # continuity such as "e poi?" still uses the compact recent transcript.
         if any(marker in text for marker in cls._MEMORY_MARKERS):
             return False
         return True
 
     @classmethod
     def _compact_realtime_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Minimize prefill for ordinary speech without touching stored history.
-
-        The full JARVIS prompt is intentionally rich for tools and complex work,
-        but sending it for "come stai?" wastes most of the first-token budget.
-        For a simple voice turn keep a compact identity prompt plus only the last
-        few actual dialogue turns. Persistent memory remains stored unchanged and
-        is used again automatically on non-fast/memory-sensitive turns.
-        """
         dialogue: list[dict[str, Any]] = []
         for message in messages:
             role = str(message.get("role") or "")
@@ -154,9 +177,6 @@ class LMStudioClient:
             text = content.strip()
             if text:
                 dialogue.append({"role": role, "content": text[-1200:]})
-
-        # Six messages = roughly the last three exchanges, enough for natural
-        # local continuity while keeping prompt prefill small and predictable.
         dialogue = dialogue[-6:]
         return [{"role": "system", "content": cls._FAST_SYSTEM_PROMPT}, *dialogue]
 
@@ -173,9 +193,6 @@ class LMStudioClient:
         if not fast or "qwen" not in cls._normalize_model_name(model):
             return prepared, fast
 
-        # Qwen's soft switch disables long hidden reasoning for the current turn.
-        # Work on a copy so the permanent conversation transcript never stores
-        # the control token.
         prepared = [dict(message) for message in prepared]
         for index in range(len(prepared) - 1, -1, -1):
             if prepared[index].get("role") != "user":
@@ -233,10 +250,7 @@ class LMStudioClient:
         if fast_turn:
             payload["max_tokens"] = 160
 
-        prompt_chars = sum(
-            len(str(message.get("content") or ""))
-            for message in prepared_messages
-        )
+        prompt_chars = sum(len(str(message.get("content") or "")) for message in prepared_messages)
         started = time.monotonic()
         produced = False
         first_token_logged = False
