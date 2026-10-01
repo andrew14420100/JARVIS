@@ -30,14 +30,7 @@ def build_realtime_gateway(
     get_tts: Callable[[], Any] | None = None,
     brain_status: Callable[[], dict[str, object]] | None = None,
 ) -> FastAPI:
-    """Put latency-critical routes before the legacy catch-all application.
-
-    The main FastAPI app already owns memory, tools, health and the static UI.
-    This lightweight gateway owns only the conversational hot path.  It is
-    mounted *before* the core app so a streaming turn never goes through the
-    legacy catch-all route and so the browser can consume the first LLM token
-    immediately instead of waiting for a complete ChatResponse.
-    """
+    """Latency-critical gateway in front of the legacy FastAPI application."""
 
     if get_agent is None or get_tts is None or brain_status is None:
         import jarvis.app as jarvis_app
@@ -88,8 +81,6 @@ def build_realtime_gateway(
                 if not emitted:
                     yield _ndjson({"type": "error", "detail": str(exc)})
                 else:
-                    # Preserve already-spoken partial text rather than crashing
-                    # the live voice turn after audio has begun.
                     yield _ndjson({"type": "done", "partial": True, "detail": str(exc)})
             finally:
                 try:
@@ -105,20 +96,17 @@ def build_realtime_gateway(
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
-    def require_bistream_tts():
+    def require_tts():
+        # Never call /health in the realtime packet path. The actual bistream
+        # operation is the health check; extra HTTP round-trips add audible delay.
         tts = get_tts()
         if tts is None:
             raise HTTPException(status_code=503, detail="CosyVoice locale non selezionato.")
-        status = tts.status()
-        if not status.get("ready"):
-            raise HTTPException(status_code=503, detail="CosyVoice locale non pronto.")
-        if not status.get("native_bistream"):
-            raise HTTPException(status_code=409, detail="CosyVoice bistream non disponibile.")
         return tts
 
     @gateway.post("/api/realtime/tts/bistream/start")
     def bistream_start() -> dict[str, object]:
-        tts = require_bistream_tts()
+        tts = require_tts()
         try:
             response = httpx.post(f"{tts.base_url}/tts/bistream/start", timeout=3.0)
             response.raise_for_status()
@@ -132,7 +120,7 @@ def build_realtime_gateway(
 
     @gateway.post("/api/realtime/tts/bistream/{session_id}/push")
     def bistream_push(session_id: str, request: BistreamPushRequest) -> dict[str, bool]:
-        tts = require_bistream_tts()
+        tts = require_tts()
         clean = tts._clean_for_speech(request.text)
         if not clean:
             return {"ok": True}
@@ -149,7 +137,7 @@ def build_realtime_gateway(
 
     @gateway.post("/api/realtime/tts/bistream/{session_id}/finish")
     def bistream_finish(session_id: str) -> dict[str, bool]:
-        tts = require_bistream_tts()
+        tts = require_tts()
         try:
             response = httpx.post(
                 f"{tts.base_url}/tts/bistream/{session_id}/finish",
@@ -162,7 +150,7 @@ def build_realtime_gateway(
 
     @gateway.get("/api/realtime/tts/bistream/{session_id}/audio")
     def bistream_audio(session_id: str) -> StreamingResponse:
-        tts = require_bistream_tts()
+        tts = require_tts()
 
         def audio_bytes() -> Iterator[bytes]:
             try:
@@ -191,6 +179,5 @@ def build_realtime_gateway(
             },
         )
 
-    # Keep all non-hot-path routes and the React build on the existing app.
     gateway.mount("/", core_app)
     return gateway
