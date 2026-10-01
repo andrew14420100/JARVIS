@@ -4,6 +4,7 @@ from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
 from jarvis.brain.cloud import CloudAIClient
 from jarvis.brain.lmstudio import LMStudioClient
 from jarvis.config.settings import Settings
+from jarvis.core.state import JarvisState
 from jarvis.voice.cosyvoice_stable import CosyVoiceProxyTTS
 
 
@@ -28,6 +29,32 @@ class StreamClient:
 
     def chat_completion(self, **_kwargs):
         return {"role": "assistant", "content": "fallback", "tool_calls": []}
+
+
+class PartialFailureClient(StreamClient):
+    def chat_completion_stream(self, **_kwargs):
+        yield "Ciao"
+        raise RuntimeError("stream interrotto")
+
+
+class EmptyFailureClient(StreamClient):
+    def chat_completion_stream(self, **_kwargs):
+        if False:
+            yield ""
+        raise RuntimeError("stream non disponibile")
+
+
+def make_agent(client=None):
+    return StableJarvisOrchestrator(
+        Settings(
+            model="qwen-local",
+            memory_enabled=False,
+            openjarvis_enabled=False,
+            conversation_max_messages=8,
+        ),
+        client or StreamClient(),
+        EmptyRegistry(),
+    )
 
 
 def test_lmstudio_streams_sse_deltas():
@@ -109,34 +136,36 @@ def test_cloud_client_can_run_only_from_local_streaming_fallback():
 
 
 def test_stream_interruption_keeps_history_valid():
-    agent = StableJarvisOrchestrator(
-        Settings(
-            model="qwen-local",
-            memory_enabled=False,
-            openjarvis_enabled=False,
-            conversation_max_messages=8,
-        ),
-        StreamClient(),
-        EmptyRegistry(),
-    )
+    agent = make_agent()
     stream = agent.process_message_stream("Dimmi qualcosa")
     assert next(stream) == "Ciao"
     stream.close()
     assert agent.messages[-1]["role"] == "assistant"
     assert agent.messages[-1]["content"] == "Ciao"
+    assert agent.state is JarvisState.IDLE
+
+
+def test_partial_provider_failure_does_not_crash_voice_session():
+    agent = make_agent(PartialFailureClient())
+    chunks = list(agent.process_message_stream("Dimmi qualcosa"))
+    assert chunks == ["Ciao"]
+    assert agent.messages[-1] == {"role": "assistant", "content": "Ciao"}
+    assert agent.state is JarvisState.IDLE
+    assert "stream interrotto" in agent.last_reasoning.get("stream_error", "")
+
+
+def test_failure_before_first_token_retries_guarded_path_once():
+    agent = make_agent(EmptyFailureClient())
+    assert "".join(agent.process_message_stream("Dimmi qualcosa")) == "fallback"
+    assert agent.messages[-1]["role"] == "assistant"
+    assert agent.messages[-1]["content"] == "fallback"
+    user_turns = [message for message in agent.messages if message.get("role") == "user"]
+    assert len(user_turns) == 1
+    assert agent.state is JarvisState.SPEAKING
 
 
 def test_history_is_bounded_across_long_voice_session():
-    agent = StableJarvisOrchestrator(
-        Settings(
-            model="qwen-local",
-            memory_enabled=False,
-            openjarvis_enabled=False,
-            conversation_max_messages=8,
-        ),
-        StreamClient(),
-        EmptyRegistry(),
-    )
+    agent = make_agent()
     for index in range(20):
         assert "".join(agent.process_message_stream(f"Turno {index}")) == "Ciao, signore."
     assert len(agent.messages) <= 9
@@ -152,3 +181,4 @@ def test_cosyvoice_first_live_packet_is_small():
     )
     assert packets
     assert len(packets[0]) <= 40
+    assert packets[0].endswith(",")
