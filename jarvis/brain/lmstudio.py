@@ -55,7 +55,9 @@ class LMStudioClient:
         preferred = cls._normalize_model_name(preferred_model)
         if not loaded or not preferred:
             return False
-        return loaded == preferred or loaded.endswith(preferred) or preferred.endswith(loaded)
+        # LM Studio/llama.cpp commonly append quantization/container suffixes
+        # such as GGUF, Q4_K_M or FP8 to the canonical model id.
+        return loaded == preferred or preferred in loaded or loaded in preferred
 
     @staticmethod
     def _parse_preferences(preferred_models: str | Iterable[str] | None) -> list[str]:
