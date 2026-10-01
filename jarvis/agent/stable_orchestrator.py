@@ -55,8 +55,6 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         if role == "owner":
             return True
         if role in {"family", "trusted", "user"}:
-            # Authorized non-owner profiles can converse and ask for information,
-            # but direct machine-changing commands remain owner-only.
             return not self._looks_operational(text)
         return not self._looks_operational(text)
 
@@ -69,27 +67,32 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
     ) -> bool:
         """Decide whether an authorized utterance is meant for JARVIS.
 
-        Clear conversational turns are resolved locally with heuristics. Only an
-        uncertain, long-idle utterance may use the already-loaded lightweight
-        local model for a tiny SI/NO classification; no cloud call is required.
+        Clear turns never pay for a second LLM request. Only an ambiguous phrase
+        after a long silence may use the local model as a tiny SI/NO classifier.
         """
         value = " ".join(str(text or "").casefold().split())
         if not value:
             return False
         if "jarvis" in value:
             return True
-        if seconds_since_reply <= 35.0:
+
+        # In an already-open conversation, human turn-taking is the default.
+        # Two minutes is intentionally generous: the user asked for a persistent
+        # agent-like session that can resume naturally after pauses.
+        if seconds_since_reply <= 120.0:
             return True
-        if value.endswith("?") or any(value.startswith(marker) for marker in _QUESTION_MARKERS):
-            likely_question = True
-        else:
-            likely_question = False
+
+        likely_question = value.endswith("?") or any(
+            value.startswith(marker) for marker in _QUESTION_MARKERS
+        )
+        if likely_question:
+            return True
 
         local = getattr(self.client, "_local_fallback", None)
         if local is None and self.client.__class__.__name__.lower().startswith("lmstudio"):
             local = self.client
         if local is None:
-            return likely_question
+            return False
 
         try:
             model = self._resolve_realtime_local_model(local, visual=False)
@@ -117,7 +120,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
                 return False
         except Exception:
             pass
-        return likely_question
+        return False
 
     def _trim_history(self) -> None:
         limit = max(8, int(getattr(self.settings, "conversation_max_messages", 40)))
