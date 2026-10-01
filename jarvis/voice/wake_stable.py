@@ -9,12 +9,12 @@ from .wake import WakeWordListener as _BaseWakeWordListener
 
 
 class WakeWordListener(_BaseWakeWordListener):
-    """Hardened wake listener.
+    """Hardened wake listener with reliable conversational barge-in.
 
-    The original listener accepted a second very low score threshold. That was
-    useful while tuning microphones but it also made normal speech capable of
-    waking JARVIS. This runtime uses the model threshold as the activation gate,
-    adds a small RMS floor, and keeps lower scores diagnostic-only.
+    Normal speech cannot wake JARVIS below the configured model threshold.
+    When the verified wake word is spoken while JARVIS is busy, the current
+    speech/listen operation is interrupted and the same wake continues into a
+    fresh callback instead of being discarded and requiring a second wake.
     """
 
     def __init__(self, *args, min_rms: float = 0.004, **kwargs) -> None:
@@ -96,23 +96,26 @@ class WakeWordListener(_BaseWakeWordListener):
                             f"score={score:.3f} rms={rms:.4f} mode=verified"
                         )
 
-                        # Start collecting post-wake audio before handling an
-                        # interrupt too. This lets the active conversation reuse
-                        # the words immediately following "Hey Jarvis".
+                        # Start collecting immediately after the trigger. This
+                        # audio is reused by STT both for a normal wake and for
+                        # barge-in while JARVIS is speaking.
                         self.last_wake_rms = rms
                         with self._audio_lock:
                             self._post_wake_pcm.clear()
                             self._capture_post_wake = True
 
-                        if busy and busy():
+                        was_busy = bool(busy and busy())
+                        if was_busy:
                             cooldown_until = now + 1.0
                             if interrupt:
                                 interrupt()
-                            continue
+                            print("[JARVIS] Barge-in: risposta corrente interrotta, ascolto il nuovo comando.")
 
                         if callback_lock.locked():
                             continue
-                        cooldown_until = now + 1.25
+
+                        if not was_busy:
+                            cooldown_until = now + 1.25
 
                         def invoke() -> None:
                             with callback_lock:
