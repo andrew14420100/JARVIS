@@ -12,8 +12,8 @@ if (-not (Test-Path (Join-Path $upstream "pyproject.toml"))) {
     throw "PersonalJarvis non disponibile nel submodule."
 }
 
-Write-Host "[2/4] Controllo ambiente Python..."
-$venv = Join-Path $PSScriptRoot ".venv"
+Write-Host "[2/4] Controllo ambiente Python pulito..."
+$venv = Join-Path $PSScriptRoot ".venv-personaljarvis"
 $python = Join-Path $venv "Scripts\python.exe"
 if (-not (Test-Path $python)) {
     $py = Get-Command py -ErrorAction SilentlyContinue
@@ -40,7 +40,7 @@ if (-not (Test-Path $stamp)) {
         Pop-Location
     }
 } else {
-    Write-Host "PersonalJarvis gia' installato." -ForegroundColor Green
+    Write-Host "PersonalJarvis gia' installato nell'ambiente pulito." -ForegroundColor Green
 }
 
 Write-Host "[4/4] Avvio JARVIS..." -ForegroundColor Green
