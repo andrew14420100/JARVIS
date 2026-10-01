@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     memory_db_path: str = "data/jarvis_memory.sqlite3"
     memory_top_k: int = 4
 
+    # Keep the live prompt bounded. The voice runtime also compacts completed
+    # turns so long sessions do not become progressively slower.
+    conversation_max_messages: int = 32
+
     presence_enabled: bool = False
     presence_context_seconds: float = 30.0
     presence_max_items: int = 12
@@ -54,7 +58,10 @@ class Settings(BaseSettings):
     # or set an exact/unique device name such as "Microfono (USB ...)".
     audio_input_device: str = ""
     wake_model: str = "hey_jarvis"
-    wake_threshold: float = 0.35
+    # openWakeWord's bundled models are tuned around 0.5. Keeping the real gate
+    # here avoids normal speech activating the previous ~0.16 soft path.
+    wake_threshold: float = 0.50
+    wake_min_rms: float = 0.004
     wake_chunk_size: int = 1280
 
     stt_model: str = "small"
@@ -65,7 +72,7 @@ class Settings(BaseSettings):
 
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
-    listener_followup_silence_seconds: float = 8.0
+    listener_followup_silence_seconds: float = 4.0
     listener_max_utterance_seconds: float = 45.0
     listener_wake_ack_enabled: bool = True
     listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
