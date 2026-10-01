@@ -1,0 +1,8 @@
+.venv-personaljarvis/
+.venv/
+__pycache__/
+*.pyc
+.env
+private/
+data/
+custom/.cache/
