@@ -6,6 +6,7 @@ from jarvis.brain.lmstudio import LMStudioClient
 from jarvis.config.settings import Settings
 from jarvis.core.state import JarvisState
 from jarvis.voice.cosyvoice_stable import CosyVoiceProxyTTS
+from jarvis.voice.stt_stable import LocalSTT
 
 
 class EmptyRegistry:
@@ -44,14 +45,16 @@ class EmptyFailureClient(StreamClient):
         raise RuntimeError("stream non disponibile")
 
 
-def make_agent(client=None):
+def make_agent(client=None, **setting_overrides):
+    values = dict(
+        model="qwen-local",
+        memory_enabled=False,
+        openjarvis_enabled=False,
+        conversation_max_messages=8,
+    )
+    values.update(setting_overrides)
     return StableJarvisOrchestrator(
-        Settings(
-            model="qwen-local",
-            memory_enabled=False,
-            openjarvis_enabled=False,
-            conversation_max_messages=8,
-        ),
+        Settings(**values),
         client or StreamClient(),
         EmptyRegistry(),
     )
@@ -135,6 +138,59 @@ def test_cloud_client_can_run_only_from_local_streaming_fallback():
         client.close()
 
 
+def test_stable_orchestrator_prefers_local_realtime_stream():
+    class FakeLocal:
+        def resolve_model(self, _configured=""):
+            return "qwen-fast"
+
+        def chat_completion_stream(self, **_kwargs):
+            yield "Locale"
+            yield " subito"
+
+    class CloudLike(StreamClient):
+        def __init__(self):
+            self._local_fallback = FakeLocal()
+            self.last_provider = ""
+            self.last_model = ""
+            self.cloud_stream_calls = 0
+
+        def chat_completion_stream(self, **_kwargs):
+            self.cloud_stream_calls += 1
+            yield "Cloud"
+
+    client = CloudLike()
+    agent = make_agent(client, conversation_local_first=True)
+    assert "".join(agent.process_message_stream("Come stai?")) == "Locale subito"
+    assert client.cloud_stream_calls == 0
+    assert client.last_provider == "lmstudio-local-realtime"
+    assert client.last_model == "qwen-fast"
+
+
+def test_local_realtime_failure_before_token_falls_back_to_cloud_stream():
+    class BrokenLocal:
+        def resolve_model(self, _configured=""):
+            return "qwen-fast"
+
+        def chat_completion_stream(self, **_kwargs):
+            if False:
+                yield ""
+            raise RuntimeError("LM Studio offline")
+
+    class CloudLike(StreamClient):
+        def __init__(self):
+            self._local_fallback = BrokenLocal()
+            self.last_provider = ""
+            self.last_model = ""
+
+        def chat_completion_stream(self, **_kwargs):
+            yield "Cloud"
+            yield " pronto"
+
+    agent = make_agent(CloudLike(), conversation_local_first=True)
+    assert "".join(agent.process_message_stream("Come stai?")) == "Cloud pronto"
+    assert "LM Studio offline" in agent.last_reasoning.get("local_stream_error", "")
+
+
 def test_stream_interruption_keeps_history_valid():
     agent = make_agent()
     stream = agent.process_message_stream("Dimmi qualcosa")
@@ -171,6 +227,11 @@ def test_history_is_bounded_across_long_voice_session():
     assert len(agent.messages) <= 9
     assert agent.messages[0]["role"] == "system"
     assert agent.messages[1]["role"] == "user"
+
+
+def test_stt_endpoint_default_is_conversational_and_fast():
+    stt = LocalSTT(endpoint_silence_seconds=0.42)
+    assert 0.28 <= stt.endpoint_silence_seconds <= 0.42
 
 
 def test_cosyvoice_first_live_packet_is_small():
