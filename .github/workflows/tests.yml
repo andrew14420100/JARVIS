@@ -32,6 +32,7 @@ jobs:
           jarvis/voice/stt_stable.py
           jarvis/voice/wake_stable.py
           jarvis/voice/cosyvoice_stable.py
+          jarvis/voice/conversation.py
       - name: Run tests
         run: pytest -q
 
@@ -52,3 +53,23 @@ jobs:
         env:
           CI: 'true'
         run: npm run build
+
+  snapshot:
+    if: github.event_name == 'push'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tested main
+        uses: actions/checkout@v4
+      - name: Remove git metadata and local-only caches
+        run: |
+          rm -rf .git .pytest_cache __pycache__
+          find . -type d -name __pycache__ -prune -exec rm -rf {} + || true
+      - name: Upload tested JARVIS snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-main-tested
+          path: .
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
