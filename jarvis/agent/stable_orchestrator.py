@@ -32,13 +32,27 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         self._trim_history()
         return reply
 
-    def _chat_stream(self, request_messages: list[dict]) -> Iterator[str]:
-        """Use local Qwen first for ordinary speech, cloud as immediate fallback.
+    def _resolve_realtime_local_model(self, local) -> str:
+        cached = getattr(self, "_conversation_local_model", "")
+        if cached:
+            return cached
 
-        Tool-bearing and deep-agent turns never enter this method because the
-        guarded path is selected before streaming. This keeps NVIDIA/cloud
-        available for complex work while removing network latency from normal
-        back-and-forth conversation when LM Studio is already running.
+        priority = getattr(self.settings, "local_model_priority", "")
+        resolver = getattr(local, "resolve_best_model", None)
+        if callable(resolver):
+            model = resolver(priority)
+        else:
+            model = local.resolve_model("")
+        self._conversation_local_model = model
+        return model
+
+    def _chat_stream(self, request_messages: list[dict]) -> Iterator[str]:
+        """Use the best available local model first, cloud as immediate fallback.
+
+        The local pool is efficiency-first and configurable. Heavy models may be
+        installed or served separately, but JARVIS only talks to the first model
+        that the local OpenAI-compatible server reports as available. This avoids
+        trying to keep every open model resident in VRAM at the same time.
         """
         prefer_local = bool(getattr(self.settings, "conversation_local_first", True))
         local = getattr(self.client, "_local_fallback", None) if prefer_local else None
@@ -46,10 +60,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         if local is not None:
             emitted = False
             try:
-                local_model = getattr(self, "_conversation_local_model", "")
-                if not local_model:
-                    local_model = local.resolve_model("")
-                    self._conversation_local_model = local_model
+                local_model = self._resolve_realtime_local_model(local)
                 for chunk in local.chat_completion_stream(
                     model=local_model,
                     messages=request_messages,
@@ -59,7 +70,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
                         continue
                     if not emitted:
                         if hasattr(self.client, "last_provider"):
-                            self.client.last_provider = "lmstudio-local-realtime"
+                            self.client.last_provider = "local-open-model-pool"
                         if hasattr(self.client, "last_model"):
                             self.client.last_model = local_model
                     emitted = True
