@@ -271,7 +271,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
 
     @classmethod
     def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
-        """Start promptly, then buffer enough text to avoid audible starvation."""
+        """Use early natural punctuation, then larger packets for smooth speech."""
         buffer = ""
         first_packet = True
         for raw in cls._strip_think_chunks(chunks):
@@ -293,13 +293,21 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                 if unfinished_markup:
                     break
 
-                min_len = 28 if first_packet else 62
-                target = 36 if first_packet else 92
-                max_len = 40 if first_packet else 138
+                if first_packet:
+                    punctuation_min = 18
+                    word_cut_min = 30
+                    target = 36
+                    max_len = 46
+                else:
+                    punctuation_min = 62
+                    word_cut_min = 62
+                    target = 92
+                    max_len = 138
+
                 boundary = None
                 punctuation = list(re.finditer(r"[.!?;:,](?:\s+|$)", buffer))
                 for match in punctuation:
-                    if min_len <= match.end() <= max_len:
+                    if punctuation_min <= match.end() <= max_len:
                         boundary = match.end()
                         break
                 if boundary is None:
@@ -309,7 +317,7 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                             break
                 if boundary is None and len(buffer) >= max_len:
                     cut = buffer.rfind(" ", 0, max_len + 1)
-                    if cut >= min_len:
+                    if cut >= word_cut_min:
                         boundary = cut
                 if boundary is None:
                     break
