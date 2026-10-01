@@ -1,4 +1,4 @@
-name: JARVIS Tests
+name: JARVIS Full Test Suite
 
 on:
   push:
@@ -6,8 +6,111 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   backend:
+    name: Backend + AI + Voice contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "numpy>=1.26,<3"
+          python -m pip check
+      - name: Compile every Python source
+        run: python -m compileall -q jarvis backend local_voice tests
+      - name: Run complete Python test suite
+        run: pytest -q
+
+  frontend:
+    name: Frontend tests + production build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+      - name: Run frontend tests
+        working-directory: frontend
+        env:
+          CI: 'true'
+        run: npm test -- --watchAll=false --runInBand
+      - name: Build production frontend
+        working-directory: frontend
+        env:
+          CI: 'true'
+        run: npm run build
+
+  windows-runtime:
+    name: Windows voice/runtime smoke
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Windows listener dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-listener.txt
+          python -m pip install pyautogui pillow
+          python -m pip check
+      - name: Compile Python on Windows
+        run: python -m compileall -q jarvis backend local_voice tests
+      - name: Import stable desktop and voice surfaces
+        shell: pwsh
+        run: |
+          python -c "import jarvis.desktop_stable; import jarvis.desktop; import jarvis.voice.stt_stable; import jarvis.voice.wake_stable; import local_voice.cosyvoice_server; print('Windows runtime imports OK')"
+      - name: Parse every PowerShell script
+        shell: pwsh
+        run: |
+          $allErrors = @()
+          Get-ChildItem -Path . -Filter *.ps1 -Recurse | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              foreach ($err in $parseErrors) {
+                $allErrors += "$($_.FullName):$($err.Extent.StartLineNumber): $($err.Message)"
+              }
+            }
+          }
+          if ($allErrors.Count -gt 0) {
+            $allErrors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+          Write-Host "All PowerShell scripts parsed successfully."
+      - name: Run Windows audio/runtime tests
+        run: >-
+          pytest -q
+          tests/test_audio_guards.py
+          tests/test_conversation_voice.py
+          tests/test_voice_think_filter.py
+          tests/test_persistent_runtime.py
+          tests/test_realtime_pipeline.py
+          tests/test_api_smoke.py
+          tests/test_cosyvoice_service.py
+
+  stress:
+    name: Repeat suite for state leaks/flakiness
+    needs: backend
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,32 +123,19 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m pip install "numpy>=1.26,<3"
-      - name: Compile all Python sources
-        run: python -m compileall -q jarvis backend local_voice
-      - name: Run tests
-        run: pytest -q
-
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm install --no-audit --no-fund
-      - name: Build frontend
-        working-directory: frontend
-        env:
-          CI: 'true'
-        run: npm run build
+      - name: Run complete suite three consecutive times
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pass in 1 2 3; do
+            echo "=== JARVIS stress pass ${pass}/3 ==="
+            pytest -q
+          done
 
   snapshot:
+    name: Tested repository snapshot
     if: github.event_name == 'push'
-    needs: [backend, frontend]
+    needs: [backend, frontend, windows-runtime, stress]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tested main
@@ -57,7 +147,7 @@ jobs:
       - name: Upload tested JARVIS snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: JARVIS-main-tested
+          name: JARVIS-main-full-tested
           path: .
           include-hidden-files: true
           if-no-files-found: error
