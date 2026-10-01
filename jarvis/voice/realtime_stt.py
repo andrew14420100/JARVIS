@@ -221,6 +221,29 @@ class NvidiaRealtimeSTT:
             )
             receiver.start()
 
+            def send_pcm(flat: Any) -> None:
+                pcm16 = np.clip(flat * 32768.0, -32768, 32767).astype(np.int16)
+                ws.send(json.dumps({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(pcm16.tobytes()).decode("ascii"),
+                }))
+
+            # Fast-path audio captured by the wake listener. It is sent before
+            # opening the command microphone so a one-breath "Hey Jarvis,
+            # controlla..." command keeps its first words.
+            if activation_audio is not None and getattr(activation_audio, "size", 0):
+                activation = np.asarray(activation_audio, dtype=np.float32).reshape(-1)
+                activation_chunk = max(320, int(sample_rate * 0.08))
+                activation_peak = float(np.max(np.abs(activation))) if activation.size else 0.0
+                if activation_peak >= 0.003:
+                    heard_speech = True
+                    self.last_recording_heard_speech = True
+                    for start in range(0, activation.size, activation_chunk):
+                        part = activation[start:start + activation_chunk]
+                        if part.size:
+                            send_pcm(part)
+                            audio_chunks.append(part)
+
             stream_kwargs: dict[str, Any] = {
                 "samplerate": sample_rate,
                 "channels": 1,
@@ -229,13 +252,6 @@ class NvidiaRealtimeSTT:
             }
             if self.input_device not in (None, ""):
                 stream_kwargs["device"] = self.input_device
-
-            def send_pcm(flat: Any) -> None:
-                pcm16 = np.clip(flat * 32768.0, -32768, 32767).astype(np.int16)
-                ws.send(json.dumps({
-                    "type": "input_audio_buffer.append",
-                    "audio": base64.b64encode(pcm16.tobytes()).decode("ascii"),
-                }))
 
             with sd.RawInputStream(**stream_kwargs) as stream:
                 for index in range(max_chunks):
@@ -295,21 +311,6 @@ class NvidiaRealtimeSTT:
                         if silent_chunks >= silent_needed:
                             self.last_recording_end_reason = "silence"
                             break
-
-            if activation_audio is not None and getattr(activation_audio, "size", 0):
-                # Activation audio was captured locally by the wake listener
-                # before the STT socket opened. It is sent first so a fast
-                # "Hey Jarvis, ..." utterance is never clipped.
-                activation = np.asarray(activation_audio, dtype=np.float32).reshape(-1)
-                activation_chunk = max(320, int(sample_rate * 0.08))
-                for start in range(0, activation.size, activation_chunk):
-                    part = activation[start:start + activation_chunk]
-                    if part.size:
-                        send_pcm(part)
-                        audio_chunks.append(part)
-
-                heard_speech = True
-                self.last_recording_heard_speech = True
 
             if not heard_speech:
                 self.last_recording_end_reason = self.last_recording_end_reason or "initial-timeout"
