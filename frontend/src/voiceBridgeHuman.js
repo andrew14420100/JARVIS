@@ -1,7 +1,6 @@
-// Human realtime voice bridge for JARVIS.
-// Uses the browser path that proved smoother on the target PC: persistent
-// microphone permission, browser speech recognition, browser echo processing
-// and WebAudio PCM scheduling. The UI stays voice-only: no mic button or text box.
+// Human realtime voice bridge for JARVIS Realtime Core v2.
+// One browser-owned microphone, browser echo processing and one native
+// CosyVoice bistream session per answer. No mic button and no text box.
 
 let recognition = null;
 let recognitionRunning = false;
@@ -18,17 +17,27 @@ let micFrame = 0;
 let bargeSince = 0;
 let speechStartedAt = 0;
 let pcmContext = null;
-let pcmAbortController = null;
-let pcmGeneration = 0;
+let audioAbortController = null;
+let audioGeneration = 0;
+let scheduledAt = 0;
 const pcmSources = new Set();
+
+let replyGeneration = 0;
+let ttsSessionId = '';
+let ttsSessionPromise = null;
+let ttsPushChain = Promise.resolve();
+let ttsTextBuffer = '';
+let ttsFirstPacket = true;
+let replyText = '';
+let bistreamFailed = false;
 
 const RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 const API_BASE = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
-const TURN_SILENCE_MS = 360;
-const RESTART_DELAY_MS = 120;
+const TURN_SILENCE_MS = 320;
+const RESTART_DELAY_MS = 90;
 const BARGE_IN_RMS = 0.050;
-const BARGE_IN_HOLD_MS = 180;
-const BARGE_IN_GUARD_MS = 420;
+const BARGE_IN_HOLD_MS = 170;
+const BARGE_IN_GUARD_MS = 380;
 
 function setHint(text) {
   const hint = document.querySelector('.hint');
@@ -72,16 +81,45 @@ function stopRecognition() {
   recognitionRunning = false;
 }
 
-function stopAudio() {
-  pcmGeneration += 1;
-  if (pcmAbortController) {
-    try { pcmAbortController.abort(); } catch {}
+function stopScheduledAudio() {
+  audioGeneration += 1;
+  if (audioAbortController) {
+    try { audioAbortController.abort(); } catch {}
   }
-  pcmAbortController = null;
+  audioAbortController = null;
   for (const source of pcmSources) {
     try { source.stop(); } catch {}
   }
   pcmSources.clear();
+  scheduledAt = 0;
+  speaking = false;
+}
+
+async function finishRemoteSession(sessionId) {
+  if (!sessionId) return;
+  try {
+    await fetch(`${API_BASE}/api/realtime/tts/bistream/${encodeURIComponent(sessionId)}/finish`, {
+      method: 'POST',
+      cache: 'no-store',
+    });
+  } catch {
+    // Session may already have been closed by the service.
+  }
+}
+
+function cancelCurrentReply({ notify = false } = {}) {
+  replyGeneration += 1;
+  const oldSession = ttsSessionId;
+  ttsSessionId = '';
+  ttsSessionPromise = null;
+  ttsPushChain = Promise.resolve();
+  ttsTextBuffer = '';
+  ttsFirstPacket = true;
+  replyText = '';
+  bistreamFailed = false;
+  stopScheduledAudio();
+  if (oldSession) void finishRemoteSession(oldSession);
+  if (notify) window.dispatchEvent(new CustomEvent('jarvis:barge-in'));
 }
 
 async function ensureMicrophone() {
@@ -126,17 +164,14 @@ function startMicMonitor() {
       for (let i = 0; i < samples.length; i += 1) sum += samples[i] * samples[i];
       const rms = Math.sqrt(sum / samples.length);
 
-      // Natural interruption: keep the browser microphone stream alive while
-      // JARVIS speaks. If the owner starts talking, stop playback and restart
-      // speech recognition immediately.
       if (speaking && Date.now() - speechStartedAt > BARGE_IN_GUARD_MS && rms >= BARGE_IN_RMS) {
         if (!bargeSince) bargeSince = performance.now();
         if (performance.now() - bargeSince >= BARGE_IN_HOLD_MS) {
           bargeSince = 0;
-          speaking = false;
-          stopAudio();
+          cancelCurrentReply({ notify: true });
           resetBuffers();
           setVoiceState('listening');
+          setHint('');
           startRecognition();
         }
       } else {
@@ -164,7 +199,7 @@ function reopenConversation() {
   resetBuffers();
   setVoiceState('listening');
   setHint('');
-  scheduleRestart(40);
+  scheduleRestart(25);
 }
 
 function commitTurn() {
@@ -244,8 +279,45 @@ function startRecognition() {
     recognitionRunning = false;
     recognition = null;
     console.warn('[JARVIS] SpeechRecognition start:', error);
-    scheduleRestart(350);
+    scheduleRestart(300);
   }
+}
+
+export function splitSpeechBuffer(buffer, { firstPacket = false, final = false } = {}) {
+  let rest = String(buffer || '');
+  const segments = [];
+  let first = Boolean(firstPacket);
+
+  while (rest) {
+    const target = first ? 26 : 52;
+    const maxLen = first ? 46 : 92;
+    let boundary = null;
+    const punctuation = [...rest.matchAll(/[.!?;:,](?=\s|$)/g)];
+    for (const match of punctuation) {
+      const end = (match.index || 0) + 1;
+      if (end >= target) {
+        boundary = end;
+        break;
+      }
+    }
+    if (boundary == null && rest.length >= maxLen) {
+      const cut = rest.lastIndexOf(' ', maxLen);
+      if (cut >= Math.max(18, Math.floor(target / 2))) boundary = cut;
+    }
+    if (boundary == null) break;
+    const piece = rest.slice(0, boundary).trim();
+    rest = rest.slice(boundary).trimStart();
+    if (piece) {
+      segments.push(piece);
+      first = false;
+    }
+  }
+
+  if (final && rest.trim()) {
+    segments.push(rest.trim());
+    rest = '';
+  }
+  return { segments, rest, firstPacket: first };
 }
 
 function pcm16ToFloat32(bytes) {
@@ -267,23 +339,18 @@ async function getPcmContext() {
   return pcmContext;
 }
 
-async function playPcmStream(response) {
-  const generation = pcmGeneration;
+async function playBistreamAudio(response, generation) {
   const ctx = await getPcmContext();
   const sampleRate = Number(response.headers.get('X-Sample-Rate')) || 24000;
   const reader = response.body?.getReader?.();
   if (!reader) throw new Error('Streaming PCM non disponibile.');
-
-  let scheduledAt = ctx.currentTime + 0.020;
   let carry = new Uint8Array(0);
   let heard = false;
-  speaking = true;
-  speechStartedAt = Date.now();
-  setVoiceState('speaking');
+  scheduledAt = Math.max(scheduledAt, ctx.currentTime + 0.018);
 
   while (true) {
     const { value, done } = await reader.read();
-    if (done || generation !== pcmGeneration) break;
+    if (done || generation !== audioGeneration) break;
     if (!value?.byteLength) continue;
     let bytes = value;
     if (carry.byteLength) {
@@ -298,6 +365,12 @@ async function playPcmStream(response) {
 
     const floats = pcm16ToFloat32(bytes.subarray(0, usable));
     if (!floats.length) continue;
+    if (!heard) {
+      heard = true;
+      speaking = true;
+      speechStartedAt = Date.now();
+      setVoiceState('speaking');
+    }
     const buffer = ctx.createBuffer(1, floats.length, sampleRate);
     buffer.copyToChannel(floats, 0);
     const source = ctx.createBufferSource();
@@ -305,51 +378,136 @@ async function playPcmStream(response) {
     source.connect(ctx.destination);
     pcmSources.add(source);
     source.onended = () => pcmSources.delete(source);
-    const startAt = Math.max(scheduledAt, ctx.currentTime + 0.008);
+    const startAt = Math.max(scheduledAt, ctx.currentTime + 0.006);
     source.start(startAt);
     scheduledAt = startAt + buffer.duration;
-    heard = true;
   }
 
-  if (!heard || generation !== pcmGeneration) {
-    if (generation === pcmGeneration) reopenConversation();
+  if (generation !== audioGeneration) return;
+  if (!heard) {
+    reopenConversation();
     return;
   }
-  const remainingMs = Math.max(0, (scheduledAt - ctx.currentTime) * 1000) + 25;
+  const remainingMs = Math.max(0, (scheduledAt - ctx.currentTime) * 1000) + 20;
   window.setTimeout(() => {
-    if (generation === pcmGeneration) reopenConversation();
+    if (generation === audioGeneration) reopenConversation();
   }, remainingMs);
 }
 
-async function speakClonedVoice(text) {
-  const content = String(text || '').trim();
-  if (!content) {
-    reopenConversation();
-    return;
-  }
-  stopRecognition();
-  stopAudio();
-  speaking = true;
-  speechStartedAt = Date.now();
-  setVoiceState('speaking');
+async function startBistreamSession(generation) {
+  if (ttsSessionPromise) return ttsSessionPromise;
+  ttsSessionPromise = (async () => {
+    const response = await fetch(`${API_BASE}/api/realtime/tts/bistream/start`, {
+      method: 'POST',
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error('CosyVoice bistream non disponibile.');
+    const data = await response.json();
+    if (generation !== replyGeneration) throw new DOMException('Turn replaced', 'AbortError');
+    ttsSessionId = String(data.session_id || '');
+    if (!ttsSessionId) throw new Error('Sessione CosyVoice non valida.');
 
+    audioAbortController = new AbortController();
+    const localAudioGeneration = audioGeneration;
+    const audioResponse = await fetch(
+      `${API_BASE}/api/realtime/tts/bistream/${encodeURIComponent(ttsSessionId)}/audio`,
+      { signal: audioAbortController.signal, cache: 'no-store' },
+    );
+    if (!audioResponse.ok) throw new Error('Audio CosyVoice bistream non disponibile.');
+    void playBistreamAudio(audioResponse, localAudioGeneration).catch((error) => {
+      if (error?.name !== 'AbortError') console.warn('[JARVIS] Bistream audio:', error);
+    });
+    return ttsSessionId;
+  })().catch((error) => {
+    bistreamFailed = true;
+    console.warn('[JARVIS] CosyVoice bistream start:', error);
+    return '';
+  });
+  return ttsSessionPromise;
+}
+
+function queueSpeechSegment(text, generation) {
+  const packet = String(text || '').trim();
+  if (!packet || generation !== replyGeneration) return;
+  ttsPushChain = ttsPushChain.catch(() => {}).then(async () => {
+    if (generation !== replyGeneration || bistreamFailed) return;
+    const sessionId = await startBistreamSession(generation);
+    if (!sessionId || generation !== replyGeneration) return;
+    const response = await fetch(
+      `${API_BASE}/api/realtime/tts/bistream/${encodeURIComponent(sessionId)}/push`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: packet }),
+        cache: 'no-store',
+      },
+    );
+    if (!response.ok) throw new Error('Push CosyVoice fallito.');
+  }).catch((error) => {
+    bistreamFailed = true;
+    console.warn('[JARVIS] CosyVoice bistream push:', error);
+  });
+}
+
+function drainSpeechBuffer(final = false) {
+  const result = splitSpeechBuffer(ttsTextBuffer, { firstPacket: ttsFirstPacket, final });
+  ttsTextBuffer = result.rest;
+  ttsFirstPacket = result.firstPacket;
+  const generation = replyGeneration;
+  for (const segment of result.segments) queueSpeechSegment(segment, generation);
+}
+
+async function fallbackWholeReply(text, generation) {
+  if (generation !== replyGeneration || !text.trim()) return;
   try {
-    pcmAbortController = new AbortController();
+    audioAbortController = new AbortController();
     const response = await fetch(`${API_BASE}/api/tts/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: content }),
-      signal: pcmAbortController.signal,
+      body: JSON.stringify({ text }),
+      signal: audioAbortController.signal,
+      cache: 'no-store',
     });
     if (!response.ok) throw new Error('CosyVoice non disponibile.');
-    await playPcmStream(response);
+    await playBistreamAudio(response, audioGeneration);
   } catch (error) {
     if (error?.name !== 'AbortError') {
-      console.warn('[JARVIS] CosyVoice browser:', error);
       setVoiceState('voice-error', error?.message || 'CosyVoice non disponibile');
+      reopenConversation();
     }
-    reopenConversation();
   }
+}
+
+function beginReplyTurn() {
+  cancelCurrentReply();
+  replyGeneration += 1;
+  ttsTextBuffer = '';
+  ttsFirstPacket = true;
+  replyText = '';
+  bistreamFailed = false;
+  ttsPushChain = Promise.resolve();
+}
+
+function onReplyDelta(text) {
+  const delta = String(text || '');
+  if (!delta) return;
+  replyText += delta;
+  ttsTextBuffer += delta;
+  drainSpeechBuffer(false);
+}
+
+async function onReplyDone() {
+  const generation = replyGeneration;
+  drainSpeechBuffer(true);
+  await ttsPushChain.catch(() => {});
+  if (generation !== replyGeneration) return;
+
+  if (bistreamFailed || !ttsSessionId) {
+    await fallbackWholeReply(replyText, generation);
+    return;
+  }
+  const session = ttsSessionId;
+  await finishRemoteSession(session);
 }
 
 async function startHumanVoice() {
@@ -370,13 +528,13 @@ async function startHumanVoice() {
   startRecognition();
 }
 
-window.addEventListener('jarvis:reply-ready', (event) => {
-  void speakClonedVoice(event?.detail?.text || '');
+window.addEventListener('jarvis:reply-start', beginReplyTurn);
+window.addEventListener('jarvis:reply-delta', (event) => onReplyDelta(event?.detail?.text || ''));
+window.addEventListener('jarvis:reply-done', () => { void onReplyDone(); });
+window.addEventListener('jarvis:reply-error', () => {
+  cancelCurrentReply();
+  reopenConversation();
 });
-
-// The page should not consume a model turn merely to greet. JARVIS is already
-// present and listens immediately; the first natural reply follows the user.
-window.addEventListener('jarvis:greeting', () => {});
 
 if (process.env.NODE_ENV !== 'test') {
   const boot = () => { void startHumanVoice(); };
@@ -386,7 +544,7 @@ if (process.env.NODE_ENV !== 'test') {
   window.addEventListener('beforeunload', () => {
     runtimeStarted = false;
     stopRecognition();
-    stopAudio();
+    cancelCurrentReply();
     if (micFrame) window.cancelAnimationFrame(micFrame);
     micFrame = 0;
     if (micStream) micStream.getTracks().forEach((track) => track.stop());
