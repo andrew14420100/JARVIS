@@ -1,6 +1,6 @@
 import httpx
 
-from jarvis.agent.orchestrator import JarvisOrchestrator
+from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
 from jarvis.brain.cloud import CloudAIClient
 from jarvis.brain.lmstudio import LMStudioClient
 from jarvis.config.settings import Settings
@@ -109,7 +109,7 @@ def test_cloud_client_can_run_only_from_local_streaming_fallback():
 
 
 def test_stream_interruption_keeps_history_valid():
-    agent = JarvisOrchestrator(
+    agent = StableJarvisOrchestrator(
         Settings(
             model="qwen-local",
             memory_enabled=False,
@@ -127,7 +127,7 @@ def test_stream_interruption_keeps_history_valid():
 
 
 def test_history_is_bounded_across_long_voice_session():
-    agent = JarvisOrchestrator(
+    agent = StableJarvisOrchestrator(
         Settings(
             model="qwen-local",
             memory_enabled=False,
