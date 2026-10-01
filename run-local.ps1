@@ -130,15 +130,42 @@ if ((Test-Path $voiceAudio) -and (Test-Path $voiceText) -and (Test-Path $cosyRep
 Write-Host "[5/6] Controllo cervello AI locale..."
 function Test-LMStudioServer {
     try {
-        $null = Invoke-RestMethod -Uri "http://127.0.0.1:1234/v1/models" -TimeoutSec 2
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:1234/api/v1/models" -TimeoutSec 2
         return $true
-    } catch { return $false }
+    } catch {
+        try {
+            $null = Invoke-RestMethod -Uri "http://127.0.0.1:1234/v1/models" -TimeoutSec 2
+            return $true
+        } catch { return $false }
+    }
 }
-function Test-LMStudioBrain {
+
+function Get-LMStudioResidentModels {
     try {
-        $models = Invoke-RestMethod -Uri "http://127.0.0.1:1234/v1/models" -TimeoutSec 2
-        return (@($models.data).Count -gt 0)
-    } catch { return $false }
+        $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:1234/api/v1/models" -TimeoutSec 2
+        $resident = @()
+        foreach ($model in @($catalog.models)) {
+            if ([string]$model.type -ne "llm") { continue }
+            foreach ($instance in @($model.loaded_instances)) {
+                $id = [string]$instance.id
+                if (-not $id) { $id = [string]$model.key }
+                if ($id) { $resident += $id }
+            }
+        }
+        return @($resident | Select-Object -Unique)
+    } catch {
+        # Compatibility path for older LM Studio versions without native v1.
+        try {
+            $legacy = Invoke-RestMethod -Uri "http://127.0.0.1:1234/v1/models" -TimeoutSec 2
+            return @($legacy.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+        } catch {
+            return @()
+        }
+    }
+}
+
+function Test-LMStudioBrain {
+    return (@(Get-LMStudioResidentModels).Count -gt 0)
 }
 
 $lms = Get-Command lms -ErrorAction SilentlyContinue
@@ -165,9 +192,8 @@ if (-not (Test-LMStudioBrain) -and $lms) {
         } catch { $downloaded = @() }
 
         $selected = $null
-        # For ordinary voice conversation prefer a small/flash model when one is
-        # already installed. Heavy models remain available to JARVIS-Core for
-        # coding/math/planning but are not forced into the hot path.
+        # Keep the realtime resident brain small whenever such a model is already
+        # installed. Heavy models may still be used outside the hot voice path.
         $priorities = @("flash", "4b", "7b", "8b", "mini", "small", "qwen3.8", "qwen", "glm", "deepseek", "exaone")
         foreach ($needle in $priorities) {
             $selected = $downloaded | Where-Object {
@@ -183,7 +209,7 @@ if (-not (Test-LMStudioBrain) -and $lms) {
             $modelKey = [string]$selected.modelKey
             if (-not $modelKey) { $modelKey = [string]$selected.path }
             if ($modelKey) {
-                Write-Host "Carico modello conversazionale locale: $modelKey"
+                Write-Host "Carico modello conversazionale locale residente: $modelKey"
                 try { & $lmsPath load $modelKey --gpu auto --context-length 4096 | Out-Host } catch {
                     Write-Warning "Caricamento modello LM Studio fallito: $($_.Exception.Message)"
                 }
@@ -196,10 +222,12 @@ if (-not (Test-LMStudioBrain) -and $lms) {
     }
 }
 
-if (Test-LMStudioBrain) {
-    Write-Host "Cervello locale LM Studio: READY" -ForegroundColor Green
+$residentModels = @(Get-LMStudioResidentModels)
+if ($residentModels.Count -gt 0) {
+    Write-Host "Cervello locale LM Studio: READY (residente)" -ForegroundColor Green
+    Write-Host ("Modelli residenti: " + ($residentModels -join ", "))
 } else {
-    Write-Warning "Nessun modello locale disponibile: usero' i fallback cloud gratuiti."
+    Write-Warning "Nessun modello LM Studio realmente residente: usero' i fallback cloud gratuiti."
 }
 
 Write-Host "[6/6] Avvio JARVIS Realtime Core v2..."
