@@ -28,6 +28,23 @@ def main() -> None:
     jarvis_app.settings.core_router_enabled = True
     jarvis_app.settings.core_consensus_enabled = True
 
+    # The local model is the fastest and most reliable zero-cost brain when it is
+    # available. Cloud-free providers remain fallbacks, never the only route.
+    jarvis_app.settings.lm_studio_fallback_enabled = True
+    jarvis_app.settings.conversation_local_first = True
+
+    # Real microphone logs from the target PC showed valid hey_jarvis candidates
+    # around 0.247 with a very low USB input level. Keep wake score as the main
+    # confidence signal and use a tiny floor only to reject literal digital zero.
+    jarvis_app.settings.wake_threshold = min(
+        float(getattr(jarvis_app.settings, "wake_threshold", 0.22)),
+        0.22,
+    )
+    jarvis_app.settings.wake_min_rms = min(
+        float(getattr(jarvis_app.settings, "wake_min_rms", 0.00005)),
+        0.00005,
+    )
+
     # Share one federated JARVIS-Core between the desktop voice loop and FastAPI.
     # The user still experiences one assistant, while the core can route each
     # turn to the best available specialist model behind the scenes.
@@ -39,12 +56,6 @@ def main() -> None:
             jarvis_app.client,
             jarvis_app.registry,
         )
-
-    # Real microphone logs showed valid "Hey Jarvis" peaks around 0.31.
-    jarvis_app.settings.wake_threshold = min(
-        float(getattr(jarvis_app.settings, "wake_threshold", 0.28)),
-        0.28,
-    )
 
     # Import only after shared settings/orchestrator are installed.
     from jarvis import desktop
