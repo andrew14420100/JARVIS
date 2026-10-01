@@ -77,16 +77,28 @@ if ($openJarvisEnabled) {
     Write-Host "OpenJarvis disabilitato: salto installazione cognitiva pesante."
 }
 
-Write-Host "[3/7] Controllo modelli wake-word..."
+Write-Host "[3/7] Controllo NVIDIA Nemotron ASR realtime..."
+$nemoSpeech = Get-Command nemo-speech -ErrorAction SilentlyContinue
+if ($nemoSpeech) {
+    try {
+        & powershell -ExecutionPolicy Bypass -File ".\start-nvidia-asr.ps1"
+    } catch {
+        Write-Warning "NVIDIA Nemotron ASR non e' diventato pronto: $($_.Exception.Message). JARVIS usera' il fallback faster-whisper."
+    }
+} else {
+    Write-Warning "NeMo-Speech.cpp non installato. Esegui .\setup-nvidia-asr.ps1 una volta per attivare il nuovo STT realtime. Per ora JARVIS usera' faster-whisper CUDA."
+}
+
+Write-Host "[4/7] Controllo modelli wake-word..."
 & $python -c "from openwakeword import utils; utils.download_models()"
 
-Write-Host "[4/7] Preparo configurazione..."
+Write-Host "[5/7] Preparo configurazione..."
 if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
     Copy-Item ".env.example" ".env"
     Write-Host "Creato .env da .env.example."
 }
 
-Write-Host "[5/7] Compilo la UI React/WebGL..."
+Write-Host "[6/7] Compilo la UI React/WebGL..."
 $npm = Get-Command npm -ErrorAction SilentlyContinue
 if (-not $npm) {
     throw "Node.js/npm non trovato. Installa Node.js LTS per usare la nuova UI WebGL locale."
@@ -101,7 +113,7 @@ try {
     Pop-Location
 }
 
-Write-Host "[6/7] Controllo voce locale CosyVoice..."
+Write-Host "[7/7] Controllo voce locale CosyVoice..."
 $voiceAudio = Join-Path $PSScriptRoot "private\voices\jarvis.wav"
 $voiceText = Join-Path $PSScriptRoot "private\voices\jarvis.txt"
 $cosyRepo = Join-Path $PSScriptRoot ".local\cosyvoice\CosyVoice"
@@ -142,7 +154,7 @@ if ((Test-Path $voiceAudio) -and (Test-Path $voiceText) -and (Test-Path $cosyRep
     Write-Host "Servono private\voices\jarvis.wav e private\voices\jarvis.txt, oltre al modello CosyVoice."
 }
 
-Write-Host "[7/7] Avvio JARVIS..."
+Write-Host "[8/8] Avvio JARVIS..."
 $brainMode = "cloud"
 if (Test-Path ".env") {
     $brainLine = Get-Content ".env" | Where-Object { $_ -match '^JARVIS_BRAIN_MODE=' } | Select-Object -Last 1
