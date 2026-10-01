@@ -11,6 +11,7 @@ from jarvis.config.settings import get_settings
 from jarvis.core.state import JarvisState
 from jarvis.presence import PresenceContext
 from jarvis.voice import CosyVoiceProxyTTS, LocalSTT, LocalTTS, WakeWordListener
+from jarvis.voice.conversation import followup_wait_seconds, is_stop_phrase
 
 
 ACOUSTIC_GUARD_SECONDS = 0.24
@@ -55,6 +56,7 @@ def main() -> None:
         compute_type=settings.stt_compute_type,
         language=settings.stt_language,
         input_device=input_device,
+        endpoint_silence_seconds=settings.stt_silence_seconds,
     )
 
     if settings.tts_mode.strip().lower() == "cosyvoice-local" and settings.cosyvoice_enabled:
@@ -77,6 +79,7 @@ def main() -> None:
         chunk_size=settings.wake_chunk_size,
         context_seconds=settings.presence_context_seconds,
         input_device=input_device,
+        min_rms=settings.wake_min_rms,
     )
     presence = PresenceContext(
         max_items=settings.presence_max_items,
@@ -106,17 +109,25 @@ def main() -> None:
         print(f"[STT] Warm-up non riuscito: {exc}. Verra' ritentato al primo comando.")
 
     busy = threading.Event()
+    barge_in_requested = threading.Event()
     agent = get_orchestrator()
 
     def acoustic_guard() -> None:
         time.sleep(ACOUSTIC_GUARD_SECONDS)
 
-    def interrupt() -> None:
+    def stop_current_turn(*, barge_in: bool = False) -> None:
+        if barge_in:
+            barge_in_requested.set()
         stt.abort()
         if tts_ready:
             tts.stop()
         agent.set_state(JarvisState.IDLE)
-        busy.clear()
+
+    def request_barge_in() -> None:
+        """Interrupt speech after a verified wake word while a turn is active."""
+        if not settings.listener_barge_in_enabled:
+            return
+        stop_current_turn(barge_in=True)
 
     def capture_turn(
         *,
@@ -178,6 +189,31 @@ def main() -> None:
         )
         return text
 
+    def capture_with_wake_paused(**kwargs) -> str:
+        """Give STT exclusive ownership of the Windows microphone."""
+        wake.pause()
+        try:
+            if wake.selected_device is not None:
+                stt.input_device = wake.selected_device
+            return capture_turn(**kwargs)
+        finally:
+            wake.resume()
+
+    def speak_error(reason: object) -> str:
+        phrase = str(settings.listener_error_phrase or "").strip()
+        if not phrase:
+            phrase = "Mi dispiace signore, ho avuto un problema nell'elaborare la richiesta."
+        print(f"[JARVIS] Errore elaborazione: {reason}")
+        if settings.tts_enabled and tts_ready and not barge_in_requested.is_set():
+            try:
+                agent.set_state(JarvisState.SPEAKING)
+                tts.speak(phrase, streamed=True)
+                acoustic_guard()
+            except Exception as voice_exc:
+                print(f"[JARVIS] Impossibile pronunciare l'errore: {voice_exc}")
+        agent.set_state(JarvisState.IDLE)
+        return phrase
+
     def answer_turn(text: str, ambient_context: str = "") -> str:
         print(f"TU: {text}")
         brain_started = time.monotonic()
@@ -192,35 +228,46 @@ def main() -> None:
                 iterator = stream_method(text, ambient_context=ambient_context)
             else:
                 iterator = iter([agent.process_message(text, ambient_context=ambient_context)])
-            for chunk in iterator:
-                if not chunk:
-                    continue
-                if first_token_at is None:
-                    first_token_at = time.monotonic()
-                collected.append(chunk)
-                yield chunk
-            brain_done_at = time.monotonic()
+            try:
+                for chunk in iterator:
+                    if not chunk:
+                        continue
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                    collected.append(chunk)
+                    yield chunk
+            finally:
+                close = getattr(iterator, "close", None)
+                if callable(close):
+                    close()
+                brain_done_at = time.monotonic()
 
         tts_spoken = False
-        if settings.tts_enabled and tts_ready and hasattr(tts, "speak_text_stream"):
-            try:
+        try:
+            if settings.tts_enabled and tts_ready and hasattr(tts, "speak_text_stream"):
                 tts_started = time.monotonic()
                 tts.speak_text_stream(brain_chunks())
-                tts_spoken = True
+                tts_spoken = not barge_in_requested.is_set()
                 print(f"[LATENCY] turno_voce_totale={time.monotonic() - tts_started:.2f}s")
-            except Exception as exc:
-                print(f"[JARVIS] TTS live non disponibile: {exc}")
-        else:
-            for _ in brain_chunks():
-                pass
+            else:
+                for _ in brain_chunks():
+                    pass
+        except Exception as exc:
+            print(f"[JARVIS] Stream risposta non disponibile: {exc}")
 
         reply = "".join(collected).strip()
         if brain_done_at is None:
             brain_done_at = time.monotonic()
 
+        if barge_in_requested.is_set():
+            print("[JARVIS] Risposta interrotta dall'utente.")
+            return reply
+
+        if not reply:
+            return speak_error("il cervello non ha restituito una risposta utilizzabile")
+
         presence.add(text, speaker="utente")
-        if reply:
-            presence.add(reply, speaker="Jarvis")
+        presence.add(reply, speaker="Jarvis")
         print(f"JARVIS: {reply}")
         if first_token_at is not None:
             print(f"[LATENCY] cervello_primo_token={first_token_at - brain_started:.2f}s")
@@ -234,113 +281,123 @@ def main() -> None:
                 f"score={reasoning.get('score')}"
             )
 
-        if settings.tts_enabled and tts_ready and reply and not tts_spoken and not hasattr(tts, "speak_text_stream"):
+        # If live TTS failed but the brain produced text, retry once through the
+        # simpler streaming endpoint instead of silently dropping the answer.
+        if settings.tts_enabled and tts_ready and not tts_spoken:
             try:
                 agent.set_state(JarvisState.SPEAKING)
                 tts_started = time.monotonic()
                 tts.speak(reply, streamed=True)
-                print(f"[LATENCY] voce_totale={time.monotonic() - tts_started:.2f}s")
+                print(f"[LATENCY] voce_fallback={time.monotonic() - tts_started:.2f}s")
                 tts_spoken = True
             except Exception as exc:
-                print(f"[JARVIS] TTS non disponibile: {exc}")
+                print(f"[JARVIS] TTS fallback non disponibile: {exc}")
 
         if tts_spoken:
             acoustic_guard()
         return reply
 
-    def handle_wake() -> None:
-        if busy.is_set():
-            interrupt()
-            return
-        busy.set()
-
+    def capture_command_after_verified_wake() -> str:
+        """Reuse post-wake PCM and then hand the microphone to Whisper."""
         time.sleep(POST_WAKE_CAPTURE_DELAY_SECONDS)
 
-        post_wake_audio = None
         try:
-            post_wake_audio = wake.post_wake_audio(seconds=0.58, exclude_head_seconds=0.14)
+            post_wake_audio = wake.post_wake_audio(seconds=0.72, exclude_head_seconds=0.14)
         except Exception:
             post_wake_audio = None
 
         continued, post_peak, post_noise, post_threshold = _post_wake_speech_profile(post_wake_audio)
 
-        if wake.selected_device is not None:
-            stt.input_device = wake.selected_device
+        if continued:
+            print(
+                "[JARVIS] Comando dopo wake rilevato · "
+                f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f}"
+            )
+            text = capture_with_wake_paused(
+                initial_silence_seconds=0.75,
+                max_seconds=min(settings.listener_max_utterance_seconds, 12.0),
+                activation_audio=post_wake_audio,
+                activation_has_speech=True,
+            )
+        else:
+            print(
+                "[JARVIS] Wake isolata · "
+                f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f} · "
+                "wake non inviata a Whisper"
+            )
+            text = ""
 
-        wake.pause()
+        if text:
+            return text
+
+        if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
+            try:
+                tts.speak("Sì?", streamed=True)
+                acoustic_guard()
+            except Exception as exc:
+                print(f"[JARVIS] TTS prompt non disponibile: {exc}")
+
+        print("[JARVIS] In ascolto del comando...")
+        return capture_with_wake_paused(
+            initial_silence_seconds=2.8,
+            max_seconds=min(settings.listener_max_utterance_seconds, 12.0),
+        )
+
+    def handle_wake() -> None:
+        # A verified wake while busy is normally handled inside wake_stable via
+        # request_barge_in(). This guard prevents accidental parallel sessions.
+        if busy.is_set():
+            request_barge_in()
+            return
+
+        busy.set()
+        barge_in_requested.clear()
         try:
             print("[JARVIS] Ti ascolto...")
-            if continued:
-                print(
-                    "[JARVIS] Comando dopo wake rilevato · "
-                    f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f}"
-                )
-                text = capture_turn(
-                    initial_silence_seconds=0.65,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 10.0),
-                    activation_audio=post_wake_audio,
-                    activation_has_speech=True,
-                )
-            else:
-                print(
-                    "[JARVIS] Wake isolata · "
-                    f"peak={post_peak:.4f} noise={post_noise:.4f} soglia={post_threshold:.4f} · "
-                    "wake non inviata a Whisper"
-                )
-                text = ""
-
-            if not text:
-                if settings.listener_wake_ack_enabled and settings.tts_enabled and tts_ready:
-                    try:
-                        tts.speak("Sì?", streamed=True)
-                        acoustic_guard()
-                    except Exception as exc:
-                        print(f"[JARVIS] TTS prompt non disponibile: {exc}")
-                print("[JARVIS] In ascolto del comando...")
-                text = capture_turn(
-                    initial_silence_seconds=2.6,
-                    max_seconds=min(settings.listener_max_utterance_seconds, 10.0),
-                )
-
+            text = capture_command_after_verified_wake()
             if not text:
                 print("[JARVIS] Nessun comando rilevato.")
-                agent.set_state(JarvisState.IDLE)
                 return
 
-            context = presence.as_context() if settings.presence_enabled else ""
-            answer_turn(text, ambient_context=context)
+            while text:
+                if is_stop_phrase(text, settings.listener_stop_phrases):
+                    print("[JARVIS] Standby richiesto.")
+                    break
 
-            while not stt.abort_event.is_set():
+                context = presence.as_context() if settings.presence_enabled else ""
+                answer_turn(text, ambient_context=context)
+
+                if barge_in_requested.is_set():
+                    # wake_stable has already stopped playback and started a new
+                    # post-wake PCM buffer. Continue this same session rather than
+                    # requiring another wake callback/thread.
+                    barge_in_requested.clear()
+                    print("[JARVIS] Barge-in acquisito · ascolto il nuovo comando...")
+                    text = capture_command_after_verified_wake()
+                    if not text:
+                        print("[JARVIS] Barge-in senza comando · standby.")
+                        break
+                    continue
+
                 print("[JARVIS] Conversazione attiva · ascolto...")
-                followup = capture_turn(
-                    initial_silence_seconds=min(settings.listener_followup_silence_seconds, 4.5),
-                    max_seconds=min(settings.listener_max_utterance_seconds, 16.0),
+                followup = capture_with_wake_paused(
+                    initial_silence_seconds=followup_wait_seconds(
+                        settings.listener_followup_silence_seconds
+                    ),
+                    max_seconds=min(settings.listener_max_utterance_seconds, 20.0),
                 )
                 if not stt.last_recording_heard_speech and not followup:
                     print("[JARVIS] Standby.")
                     break
                 if not followup:
                     continue
-
-                normalized = followup.casefold().strip(" .,!?:;")
-                stop_phrases = {
-                    item.casefold().strip(" .,!?:;")
-                    for item in settings.listener_stop_phrases.split("|")
-                    if item.strip()
-                }
-                if normalized in stop_phrases:
-                    print("[JARVIS] Standby richiesto.")
-                    break
-
-                context = presence.as_context() if settings.presence_enabled else ""
-                answer_turn(followup, ambient_context=context)
+                text = followup
         except Exception as exc:
-            agent.set_state(JarvisState.ERROR)
-            print(f"[JARVIS] Errore voce: {exc}")
+            speak_error(exc)
         finally:
             wake.resume()
-            if agent.state is not JarvisState.ERROR:
-                agent.set_state(JarvisState.IDLE)
+            barge_in_requested.clear()
+            agent.set_state(JarvisState.IDLE)
             busy.clear()
 
     def serve_ui() -> None:
@@ -362,15 +419,24 @@ def main() -> None:
         print("[JARVIS] Conversation context: OFF · ambient mic transcription: OFF")
     cognitive_label = "OpenJarvis + guarded local agent" if settings.openjarvis_enabled else "guarded local agent"
     print(f"[JARVIS] Hybrid cognitive engine: {cognitive_label}")
+    print(
+        f"[JARVIS] Follow-up: {followup_wait_seconds(settings.listener_followup_silence_seconds):.1f}s · "
+        f"barge-in wake: {'ON' if settings.listener_barge_in_enabled else 'OFF'}"
+    )
     print("[JARVIS] UI: http://127.0.0.1:8000")
     print("[JARVIS] Ctrl+C per uscire.")
 
     try:
-        wake.run(handle_wake, busy=busy.is_set, interrupt=interrupt)
+        wake.run(
+            handle_wake,
+            busy=busy.is_set,
+            interrupt=request_barge_in if settings.listener_barge_in_enabled else None,
+        )
     except KeyboardInterrupt:
         pass
     finally:
-        interrupt()
+        stop_current_turn()
+        busy.clear()
         wake.stop()
         presence.clear()
         agent.close()
