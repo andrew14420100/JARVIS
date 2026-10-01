@@ -2,22 +2,66 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import re
+import time
 
 from .cosyvoice_proxy import CosyVoiceProxyTTS as _BaseCosyVoiceProxyTTS
+from .echo import echo_reference
 
 
 class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
     """CosyVoice client that degrades to ordinary streaming instead of silence."""
 
+    def _play_pcm_iterator(self, pcm_chunks: Iterator[bytes], *, label: str) -> None:
+        """Play PCM while retaining a short in-memory echo reference."""
+        import sounddevice as sd
+
+        stream = None
+        carry = b""
+        started = time.monotonic()
+        first_audio = None
+        total_bytes = 0
+        echo_reference.clear()
+        try:
+            stream = sd.RawOutputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                dtype="int16",
+                blocksize=0,
+                latency="low",
+            )
+            stream.start()
+            for chunk in pcm_chunks:
+                if self._interrupt.is_set():
+                    break
+                if not chunk:
+                    continue
+                data = carry + chunk
+                carry = b""
+                if len(data) % 2:
+                    carry = data[-1:]
+                    data = data[:-1]
+                if not data:
+                    continue
+                if first_audio is None:
+                    first_audio = time.monotonic() - started
+                    print(f"[TTS] primo_audio={first_audio:.2f}s · playback={label}")
+                total_bytes += len(data)
+                echo_reference.push_pcm16(data, self._sample_rate)
+                stream.write(data)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+            if first_audio is not None:
+                audio_seconds = total_bytes / float(max(1, self._sample_rate * 2))
+                print(f"[TTS] audio_riprodotto={audio_seconds:.2f}s · playback={label}")
+
     @staticmethod
     def _clean_for_speech(text: str) -> str:
-        """Remove hidden Qwen reasoning before the base speech cleanup runs.
-
-        The base cleaner removes markup tags, but removing only ``<think>`` and
-        ``</think>`` would leave the reasoning body behind and make JARVIS read
-        it aloud.  This stable runtime therefore strips complete reasoning
-        blocks first and handles malformed/orphan boundaries defensively.
-        """
+        """Remove hidden Qwen reasoning before the base speech cleanup runs."""
         clean = str(text or "")
         clean = re.sub(
             r"<think\b[^>]*>.*?</think>",
@@ -25,21 +69,14 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
             clean,
             flags=re.IGNORECASE | re.DOTALL,
         )
-
-        # If a stream/fallback starts in the middle of a reasoning block, an
-        # orphan closing tag can arrive without its opening tag.  Everything
-        # before that closing boundary is treated as hidden reasoning.
         while True:
             match = re.search(r"</think\s*>", clean, flags=re.IGNORECASE)
             if match is None:
                 break
             clean = clean[match.end():]
-
-        # Never speak the tail of an unfinished reasoning block.
         match = re.search(r"<think\b[^>]*>", clean, flags=re.IGNORECASE)
         if match is not None:
             clean = clean[:match.start()]
-
         return _BaseCosyVoiceProxyTTS._clean_for_speech(clean)
 
     @staticmethod
@@ -64,15 +101,11 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
             if raw is None:
                 continue
             pending += str(raw)
-
             while pending:
                 lowered = pending.lower()
-
                 if in_think:
                     close_pos = lowered.find(close_token)
                     if close_pos < 0:
-                        # Discard reasoning immediately, retaining only a tiny
-                        # suffix that may become a split closing tag next chunk.
                         keep = partial_suffix_length(pending)
                         pending = pending[-keep:] if keep else ""
                         break
@@ -86,9 +119,6 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
 
                 open_pos = lowered.find(open_token)
                 close_pos = lowered.find(close_token)
-
-                # Defensive recovery when the provider starts the stream in the
-                # middle of a reasoning section and only the closing tag arrives.
                 if close_pos >= 0 and (open_pos < 0 or close_pos < open_pos):
                     close_end = pending.find(">", close_pos)
                     if close_end < 0:
@@ -109,8 +139,6 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                     in_think = True
                     continue
 
-                # Hold a partial '<think' / '</think' suffix so a tag split by
-                # the LLM transport can never leak as speech.
                 keep = partial_suffix_length(pending)
                 if keep:
                     visible = pending[:-keep]
@@ -122,15 +150,11 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                     pending = ""
                 break
 
-        # Hidden reasoning is intentionally discarded at end-of-stream.  A
-        # dangling '<th...' fragment is markup, not user-facing speech.
         if pending and not in_think and not pending.lstrip().startswith("<"):
             yield pending
 
     @classmethod
     def _segments_from_live_text(cls, chunks: Iterator[str]) -> Iterator[str]:
-        # Release the first natural phrase early so JARVIS can start speaking
-        # while the LLM is still generating the rest of the sentence.
         buffer = ""
         first_packet = True
         for raw in cls._strip_think_chunks(chunks):
@@ -156,28 +180,22 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                 target = 20 if first_packet else 54
                 max_len = 38 if first_packet else 88
                 boundary = None
-
-                # Prefer a real punctuation boundary inside the latency window.
                 punctuation = list(re.finditer(r"[.!?;:,](?:\s+|$)", buffer))
                 for match in punctuation:
                     if min_len <= match.end() <= max_len:
                         boundary = match.end()
                         break
-                # Otherwise use the first punctuation after the target only if
-                # it is still reasonably close.
                 if boundary is None:
                     for match in punctuation:
                         if target <= match.end() <= max_len:
                             boundary = match.end()
                             break
-
                 if boundary is None and len(buffer) >= max_len:
                     cut = buffer.rfind(" ", 0, max_len + 1)
                     if cut >= min_len:
                         boundary = cut
                 if boundary is None:
                     break
-
                 piece = buffer[:boundary].strip()
                 buffer = buffer[boundary:].lstrip()
                 clean = cls._clean_for_speech(piece)
@@ -204,16 +222,10 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
             super().speak_text_stream(tracking())
             return
         except Exception as exc:
-            # stop() is used for intentional barge-in. In that case replaying
-            # the answer through /tts would make JARVIS talk again immediately
-            # after the user interrupted it.
             if self._interrupt.is_set():
                 return
             print(f"[TTS] bistream degradato, fallback stream standard: {exc}")
 
-        # Finish consuming the LLM stream so an audio error never truncates the
-        # assistant's answer/history. Then retry once through the simpler /tts
-        # endpoint, which is independent from the bistream session state.
         for chunk in source:
             text = str(chunk or "")
             if text:
