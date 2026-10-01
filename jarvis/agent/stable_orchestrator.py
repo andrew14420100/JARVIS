@@ -7,6 +7,18 @@ from jarvis.agent.orchestrator import JarvisOrchestrator
 from jarvis.core.state import JarvisState
 
 
+_OPERATION_MARKERS = (
+    "apri ", "chiudi ", "avvia ", "ferma ", "installa ", "disinstalla ",
+    "modifica ", "elimina ", "cancella ", "sposta ", "rinomina ", "salva ",
+    "invia ", "manda ", "pubblica ", "esegui ", "lancia ", "compra ",
+    "ordina ", "prenota ", "github", "file", "cartella", "pc", "sito",
+)
+_QUESTION_MARKERS = (
+    "chi ", "cosa ", "come ", "quando ", "dove ", "perché ", "perche ",
+    "quanto ", "quale ", "puoi ", "potresti ", "mi spieghi", "dimmi ",
+)
+
+
 class StableJarvisOrchestrator(JarvisOrchestrator):
     """Realtime-safe orchestrator for a persistent natural voice session."""
 
@@ -30,8 +42,82 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         prosody: str = "",
     ) -> None:
         self.current_speaker_name = str(speaker_name or "utente")[:80]
-        self.current_speaker_role = str(speaker_role or "unknown")[:32]
+        self.current_speaker_role = str(speaker_role or "unknown")[:32].casefold()
         self.current_prosody = str(prosody or "")[:400]
+
+    @staticmethod
+    def _looks_operational(text: str) -> bool:
+        value = " " + " ".join(str(text or "").casefold().split()) + " "
+        return any(marker in value for marker in _OPERATION_MARKERS)
+
+    def role_allows_request(self, text: str) -> bool:
+        role = self.current_speaker_role
+        if role == "owner":
+            return True
+        if role in {"family", "trusted", "user"}:
+            # Authorized non-owner profiles can converse and ask for information,
+            # but direct machine-changing commands remain owner-only.
+            return not self._looks_operational(text)
+        return not self._looks_operational(text)
+
+    def is_addressed_to_jarvis(
+        self,
+        text: str,
+        *,
+        ambient_context: str = "",
+        seconds_since_reply: float = 9999.0,
+    ) -> bool:
+        """Decide whether an authorized utterance is meant for JARVIS.
+
+        Clear conversational turns are resolved locally with heuristics. Only an
+        uncertain, long-idle utterance may use the already-loaded lightweight
+        local model for a tiny SI/NO classification; no cloud call is required.
+        """
+        value = " ".join(str(text or "").casefold().split())
+        if not value:
+            return False
+        if "jarvis" in value:
+            return True
+        if seconds_since_reply <= 35.0:
+            return True
+        if value.endswith("?") or any(value.startswith(marker) for marker in _QUESTION_MARKERS):
+            likely_question = True
+        else:
+            likely_question = False
+
+        local = getattr(self.client, "_local_fallback", None)
+        if local is None and self.client.__class__.__name__.lower().startswith("lmstudio"):
+            local = self.client
+        if local is None:
+            return likely_question
+
+        try:
+            model = self._resolve_realtime_local_model(local, visual=False)
+            prompt = (
+                "Decidi se l'ultima frase è rivolta all'assistente JARVIS oppure a un'altra persona. "
+                "Rispondi esclusivamente SI oppure NO. Se il contesto mostra che JARVIS stava già "
+                "conversando con il parlante, preferisci SI; non trattare automaticamente ogni frase "
+                "ambientale come una richiesta.\n\nContesto recente:\n"
+                + (ambient_context[-1800:] or "nessuno")
+                + "\n\nFrase: " + text
+            )
+            response = local.chat_completion(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Sei un classificatore di indirizzamento vocale."},
+                    {"role": "user", "content": prompt},
+                ],
+                tools=None,
+                temperature=0.0,
+            )
+            answer = str(response.get("content") or "").strip().casefold()
+            if answer.startswith("si") or answer.startswith("sì"):
+                return True
+            if answer.startswith("no"):
+                return False
+        except Exception:
+            pass
+        return likely_question
 
     def _trim_history(self) -> None:
         limit = max(8, int(getattr(self.settings, "conversation_max_messages", 40)))
@@ -75,6 +161,10 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
 
     def process_message(self, text: str, *, ambient_context: str = "") -> str:
         self._trim_history()
+        if not self.role_allows_request(text):
+            reply = "Mi dispiace, non posso eseguire questa richiesta."
+            self._record_exchange(text, reply)
+            return reply
         reply = super().process_message(text, ambient_context=ambient_context)
         if reply:
             self._record_exchange(text, reply)
@@ -95,7 +185,6 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
             cognitive_context=cognitive_context,
             base_messages=base_messages,
         )
-
         identity_context = (
             f"Parlante verificato: {self.current_speaker_name}; ruolo autorizzativo: "
             f"{self.current_speaker_role}."
@@ -106,17 +195,12 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         copied.insert(insert_at, {"role": "system", "content": identity_context})
 
         monitor = self.screen_monitor
-        if (
-            monitor is not None
-            and bool(getattr(self.settings, "screen_attach_on_visual_request", True))
-        ):
+        if monitor is not None and bool(getattr(self.settings, "screen_attach_on_visual_request", True)):
             try:
                 visual = monitor.message_content(query)
             except Exception:
                 visual = None
             if visual:
-                # Replace only the current user turn. The image remains ephemeral
-                # and is never copied into the durable conversation history.
                 for index in range(len(copied) - 1, 0, -1):
                     if copied[index].get("role") == "user":
                         copied[index] = {"role": "user", "content": visual}
@@ -152,9 +236,10 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
         return model
 
     def _chat_stream(self, request_messages: list[dict]) -> Iterator[str]:
-        """Use the best already-served local model, then free cloud fallback."""
         prefer_local = bool(getattr(self.settings, "conversation_local_first", True))
         local = getattr(self.client, "_local_fallback", None) if prefer_local else None
+        if local is None and self.client.__class__.__name__.lower().startswith("lmstudio"):
+            local = self.client
         visual = self._request_has_image(request_messages)
 
         if local is not None:
@@ -187,14 +272,15 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
                     self._conversation_local_model = ""
 
         stream_method = getattr(self.client, "chat_completion_stream")
-        yield from stream_method(
-            model=self.model,
-            messages=request_messages,
-            temperature=0.4,
-        )
+        yield from stream_method(model=self.model, messages=request_messages, temperature=0.4)
 
     def process_message_stream(self, text: str, *, ambient_context: str = "") -> Iterator[str]:
         self._trim_history()
+        if not self.role_allows_request(text):
+            reply = "Mi dispiace, non posso eseguire questa richiesta."
+            self._record_exchange(text, reply)
+            yield reply
+            return
 
         if self.pending_confirmation is not None:
             reply = self.process_message(text, ambient_context=ambient_context)
@@ -260,11 +346,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
             if partial:
                 self.messages.append({"role": "assistant", "content": partial})
                 self._record_exchange(text, partial, partial=True)
-            elif (
-                self.messages
-                and self.messages[-1].get("role") == "user"
-                and self.messages[-1].get("content") == text
-            ):
+            elif self.messages and self.messages[-1].get("role") == "user" and self.messages[-1].get("content") == text:
                 self.messages.pop()
             self._trim_history()
             self.set_state(JarvisState.IDLE)
@@ -278,11 +360,7 @@ class StableJarvisOrchestrator(JarvisOrchestrator):
                 self._trim_history()
                 self.set_state(JarvisState.IDLE)
                 return
-            if (
-                self.messages
-                and self.messages[-1].get("role") == "user"
-                and self.messages[-1].get("content") == text
-            ):
+            if self.messages and self.messages[-1].get("role") == "user" and self.messages[-1].get("content") == text:
                 self.messages.pop()
             self._trim_history()
             try:
