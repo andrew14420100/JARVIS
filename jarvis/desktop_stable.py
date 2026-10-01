@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import jarvis.app as jarvis_app
 from jarvis.agent.core_orchestrator import JarvisCoreOrchestrator
 
@@ -27,6 +30,14 @@ def main() -> None:
     jarvis_app.settings.memory_auto_semantic = True
     jarvis_app.settings.core_router_enabled = True
     jarvis_app.settings.core_consensus_enabled = True
+
+    # Hands-free means genuinely hands-free: the desktop runtime opens one
+    # persistent conversation as soon as the microphone has been selected. The
+    # wake detector remains alive only as a recovery/reopen mechanism if the
+    # user explicitly closes the session. Do not speak a synthetic activation
+    # acknowledgement at startup: JARVIS should simply be ready to hear the
+    # first natural sentence.
+    jarvis_app.settings.listener_activation_phrase = ""
 
     # Keep the complete transcript in SQLite but keep the live prompt compact.
     # This preserves long-term memory without making every casual voice turn pay
@@ -83,9 +94,50 @@ def main() -> None:
 
     # Import only after shared settings/orchestrator are installed.
     from jarvis import desktop
+    from jarvis.voice.wake_stable import WakeWordListener
 
     desktop.POST_WAKE_CAPTURE_DELAY_SECONDS = 0.10
     desktop.ACOUSTIC_GUARD_SECONDS = 0.10
+
+    # The previous stable runtime stopped after printing "Wake detector" because
+    # it intentionally waited for a wake phrase before invoking the conversation
+    # callback. For the requested human-like mode, bootstrap that same guarded
+    # callback automatically once the listener has selected a real microphone.
+    # The normal wake listener continues running, so barge-in/echo handling is
+    # unchanged and a closed session can still be reopened with Jarvis.
+    original_run = WakeWordListener.run
+    if not getattr(WakeWordListener, "_jarvis_autostart_patched", False):
+        def run_with_autostart(self, callback, *args, **kwargs):
+            bootstrap_started = threading.Event()
+
+            def bootstrap_conversation() -> None:
+                deadline = time.monotonic() + 15.0
+                while (
+                    self.selected_device is None
+                    and not self._stop.is_set()
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.025)
+                if self.selected_device is None or self._stop.is_set():
+                    print("[JARVIS] Avvio hands-free non riuscito: microfono non pronto.")
+                    return
+                if bootstrap_started.is_set():
+                    return
+                bootstrap_started.set()
+                time.sleep(0.08)
+                print("[JARVIS] Conversazione hands-free: ON · parli pure, non serve la wake word.")
+                callback()
+
+            threading.Thread(
+                target=bootstrap_conversation,
+                daemon=True,
+                name="jarvis-handsfree-bootstrap",
+            ).start()
+            return original_run(self, callback, *args, **kwargs)
+
+        WakeWordListener.run = run_with_autostart
+        WakeWordListener._jarvis_autostart_patched = True
+
     desktop.main()
 
 
