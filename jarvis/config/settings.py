@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     wake_threshold: float = 0.35
     wake_chunk_size: int = 1280
 
-    stt_model: str = "small"
+    stt_model: str = "turbo"
     stt_device: str = "auto"
     # RTX-class CUDA GPUs are considerably faster with float16 than plain int8.
     stt_compute_type: str = "float16"
@@ -65,8 +65,8 @@ class Settings(BaseSettings):
 
     browser_voice_input_enabled: bool = False
     listener_remote_base_url: str = ""
-    listener_followup_silence_seconds: float = 8.0
-    listener_max_utterance_seconds: float = 45.0
+    listener_followup_silence_seconds: float = 2.0
+    listener_max_utterance_seconds: float = 30.0
     listener_wake_ack_enabled: bool = True
     listener_stop_phrases: str = "jarvis stop|stop jarvis|basta jarvis|torna in standby|vai in standby"
 
