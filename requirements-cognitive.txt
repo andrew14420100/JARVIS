@@ -1,3 +1,0 @@
-# Optional local cognitive layer.
-# OpenJarvis is Apache-2.0 and is loaded lazily only by the Windows/local runtime.
-OpenJarvis @ git+https://github.com/open-jarvis/OpenJarvis.git@main
