@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import jarvis.app as jarvis_app
-from jarvis.agent.stable_orchestrator import StableJarvisOrchestrator
+from jarvis.agent.core_orchestrator import JarvisCoreOrchestrator
 
 
 def main() -> None:
@@ -25,12 +25,16 @@ def main() -> None:
     jarvis_app.settings.memory_enabled = True
     jarvis_app.settings.memory_full_transcript = True
     jarvis_app.settings.memory_auto_semantic = True
+    jarvis_app.settings.core_router_enabled = True
+    jarvis_app.settings.core_consensus_enabled = True
 
-    # Share one hardened orchestrator between the desktop voice loop and FastAPI.
+    # Share one federated JARVIS-Core between the desktop voice loop and FastAPI.
+    # The user still experiences one assistant, while the core can route each
+    # turn to the best available specialist model behind the scenes.
     if jarvis_app.orchestrator is None or not isinstance(
-        jarvis_app.orchestrator, StableJarvisOrchestrator
+        jarvis_app.orchestrator, JarvisCoreOrchestrator
     ):
-        jarvis_app.orchestrator = StableJarvisOrchestrator(
+        jarvis_app.orchestrator = JarvisCoreOrchestrator(
             jarvis_app.settings,
             jarvis_app.client,
             jarvis_app.registry,
