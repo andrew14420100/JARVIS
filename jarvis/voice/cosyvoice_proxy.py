@@ -119,6 +119,13 @@ class CosyVoiceProxyTTS:
         return data
 
     def stop(self) -> None:
+        """Interrupt playback without closing an httpx stream from another thread.
+
+        On Windows, closing the active streaming response from the listener thread
+        can race with httpcore's socket read and surface WinError 10038. Signalling
+        the bistream server and the playback event is enough; the consumer thread
+        owns and closes its own HTTP response cleanly.
+        """
         self._interrupt.set()
         session_id = self._active_bistream_session
         if session_id:
@@ -127,12 +134,6 @@ class CosyVoiceProxyTTS:
                     f"{self.base_url}/tts/bistream/{session_id}/finish",
                     timeout=1.0,
                 )
-            except Exception:
-                pass
-        response = self._active_response
-        if response is not None:
-            try:
-                response.close()
             except Exception:
                 pass
         try:
@@ -170,7 +171,6 @@ class CosyVoiceProxyTTS:
             buffer += str(raw)
 
             while buffer:
-                # Never release an unfinished internal markup block to speech.
                 lowered = buffer.lower()
                 unfinished_markup = False
                 for opening, closing in (
@@ -185,8 +185,6 @@ class CosyVoiceProxyTTS:
                 if unfinished_markup:
                     break
 
-                # A short first packet minimizes time-to-first-speech. Later
-                # packets are larger because native bistream preserves prosody.
                 target = 34 if first_packet else 64
                 max_len = 52 if first_packet else 96
                 boundary: int | None = None
@@ -239,6 +237,8 @@ class CosyVoiceProxyTTS:
                     if chunk:
                         yield chunk
         except httpx.HTTPError as exc:
+            if self._interrupt.is_set():
+                return
             raise CosyVoiceProxyError(f"Errore dal motore vocale locale: {exc}") from exc
         finally:
             self._active_response = None
@@ -311,11 +311,10 @@ class CosyVoiceProxyTTS:
 
     def speak_text_stream(self, chunks: Iterator[str]) -> None:
         """Feed live LLM text into one native CosyVoice3 bistream session."""
-        import sounddevice as sd  # noqa: F401 - dependency check before session start
+        import sounddevice as sd  # noqa: F401
 
         health = self._health()
         if not health.get("bistream"):
-            # Backwards-compatible fallback for an older voice service.
             full_text = "".join(str(chunk or "") for chunk in chunks)
             self.speak(full_text, streamed=True)
             return
@@ -358,7 +357,8 @@ class CosyVoiceProxyTTS:
                             label="cosyvoice-bistream",
                         )
                 except Exception as exc:
-                    audio_errors.append(exc)
+                    if not self._interrupt.is_set():
+                        audio_errors.append(exc)
                 finally:
                     self._active_response = None
 
@@ -381,6 +381,8 @@ class CosyVoiceProxyTTS:
                 packets_sent += 1
 
         except Exception as exc:
+            if self._interrupt.is_set():
+                return
             raise CosyVoiceProxyError(f"Errore bistream CosyVoice: {exc}") from exc
         finally:
             if session_id:
@@ -398,7 +400,7 @@ class CosyVoiceProxyTTS:
             self._active_bistream_session = None
             self._speaking.clear()
 
-        if audio_errors:
+        if audio_errors and not self._interrupt.is_set():
             raise CosyVoiceProxyError(f"Playback bistream fallito: {audio_errors[0]}")
 
         print(
