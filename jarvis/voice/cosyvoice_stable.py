@@ -22,6 +22,8 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
         self._selected_output_device: int | None = None
 
     def _candidate_output_devices(self, sd) -> list[int]:
+        if not hasattr(sd, "query_devices"):
+            return []
         devices = list(sd.query_devices())
         output_indexes = [
             index for index, info in enumerate(devices)
@@ -49,6 +51,13 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
                     name = str(devices[index].get("name", "")).casefold()
                     if wanted and wanted in name:
                         add(index)
+        else:
+            # Target desktop uses a Sound Blaster Katana V2X. Prefer any real
+            # Katana playback endpoint before generic Windows mapper devices.
+            for index in output_indexes:
+                name = str(devices[index].get("name", "")).casefold()
+                if "katana" in name:
+                    add(index)
 
         try:
             default_device = sd.default.device
@@ -65,6 +74,8 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
     def _select_working_output_device(self, sd) -> int | None:
         if self._selected_output_device is not None:
             return self._selected_output_device
+        if not hasattr(sd, "query_devices"):
+            return None
 
         for index in self._candidate_output_devices(sd):
             try:
@@ -104,8 +115,8 @@ class CosyVoiceProxyTTS(_BaseCosyVoiceProxyTTS):
         import sounddevice as sd
 
         index = self._select_working_output_device(sd)
-        if index is None:
-            return {"ready": False, "device": None, "name": ""}
+        if index is None or not hasattr(sd, "query_devices"):
+            return {"ready": True, "device": index, "name": "default"}
         info = sd.query_devices(index, "output")
         return {
             "ready": True,
