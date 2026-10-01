@@ -62,10 +62,15 @@ $env:JARVIS_CUSTOM_VOICE_TEXT = (Get-Content -LiteralPath $voiceTxt -Raw -Encodi
 if ($LASTEXITCODE -ne 0) { throw "Configurazione della voce JARVIS fallita." }
 Write-Host "Voce clonata JARVIS pronta." -ForegroundColor Green
 
-Write-Host "[5/5] Avvio JARVIS..." -ForegroundColor Green
+Write-Host "[5/5] Avvio JARVIS con il profilo del video..." -ForegroundColor Green
+$profileRunner = Join-Path $PSScriptRoot "custom\run_ironman_jarvis.py"
+if (-not (Test-Path -LiteralPath $profileRunner)) {
+    throw "Profilo JARVIS mancante: $profileRunner"
+}
+
 Push-Location $upstream
 try {
-    & $python -m jarvis
+    & $python $profileRunner
 } finally {
     Pop-Location
 }
