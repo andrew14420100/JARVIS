@@ -1,0 +1,8 @@
+{
+  "jarvis.memoryRoot": "brain",
+  "jarvis.autoOpen": false,
+  "files.watcherExclude": {
+    "**/extension/node_modules/**": true,
+    "**/.venv-personaljarvis/**": true
+  }
+}

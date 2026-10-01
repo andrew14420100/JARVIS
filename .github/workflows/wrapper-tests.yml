@@ -1,4 +1,4 @@
-name: JARVIS Foundation Check
+name: JARVIS Video Architecture Check
 
 on:
   push:
@@ -7,13 +7,13 @@ on:
     branches: [main]
 
 jobs:
-  windows-wrapper:
+  windows-launcher:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Verify pinned upstream
+      - name: Verify pinned voice runtime
         shell: powershell
         run: |
           $sha = git -C personal-jarvis rev-parse HEAD
@@ -24,19 +24,28 @@ jobs:
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '.\run-local.ps1'), [ref]$null, [ref]$errors)
           if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      - name: Verify cloned voice assets
+        shell: powershell
+        run: |
+          @('voice/jarvis.mp3','voice/jarvis.txt','voice/apply_voice.py') | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Missing $_" }
+          }
 
-  source-import:
+  brain-extension:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          submodules: recursive
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install source foundation
-        run: python -m pip install -e ./personal-jarvis
-      - name: Import and version smoke
-        run: |
-          python -c "import jarvis; print(getattr(jarvis, '__version__', 'ok'))"
-          python -m jarvis --version
+          node-version: '20'
+      - name: Install extension dependencies
+        run: npm install --no-audit --no-fund
+      - name: Static check and bundle webviews
+        run: npm run check
+      - name: Package VSIX
+        run: npm run package
+      - name: Verify VSIX
+        run: test -s jarvis-brain.vsix

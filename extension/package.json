@@ -1,0 +1,66 @@
+{
+  "name": "jarvis-brain",
+  "displayName": "JARVIS Brain",
+  "description": "JARVIS brain grid, radar and Foam memory views inspired by the reference workflow.",
+  "version": "0.1.0",
+  "publisher": "andrew14420100",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other", "Visualization"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:jarvis.open",
+    "onCommand:jarvis.brainGrid",
+    "onCommand:jarvis.radar",
+    "onCommand:jarvis.radarAds",
+    "onCommand:jarvis.installBrain",
+    "onUri"
+  ],
+  "main": "./src/extension.js",
+  "files": [
+    "src/extension.js",
+    "src/brain.js",
+    "media/*.bundle.js",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node --check src/extension.js && node --check src/brain.js && node build.mjs",
+    "package": "npm run build && vsce package --no-dependencies -o jarvis-brain.vsix"
+  },
+  "dependencies": {
+    "3d-force-graph": "^1.79.0",
+    "three": "^0.180.0",
+    "three-spritetext": "^1.10.0"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.10"
+  },
+  "contributes": {
+    "commands": [
+      { "command": "jarvis.open", "title": "Jarvis: Apri" },
+      { "command": "jarvis.brainGrid", "title": "Jarvis: Griglia del Cervello" },
+      { "command": "jarvis.radar", "title": "Jarvis: Radar" },
+      { "command": "jarvis.radarAds", "title": "Jarvis: Radar Ads" },
+      { "command": "jarvis.installBrain", "title": "Jarvis: Installa il cervello" }
+    ],
+    "configuration": {
+      "title": "JARVIS",
+      "properties": {
+        "jarvis.memoryRoot": {
+          "type": "string",
+          "default": "brain",
+          "description": "Cartella Markdown/Foam usata come memoria persistente di JARVIS."
+        },
+        "jarvis.autoOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Apri automaticamente la Griglia del Cervello all'avvio di VS Code."
+        }
+      }
+    }
+  }
+}
