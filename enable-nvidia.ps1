@@ -57,11 +57,13 @@ Set-EnvValue "JARVIS_NVIDIA_API_KEY" $existingKey.Trim()
 Set-EnvValue "JARVIS_NVIDIA_MODEL" "nvidia/nemotron-3-ultra-550b-a55b"
 Set-EnvValue "JARVIS_LM_STUDIO_FALLBACK_ENABLED" "true"
 Set-EnvValue "JARVIS_LM_STUDIO_BASE_URL" "http://127.0.0.1:1234/v1"
+Set-EnvValue "JARVIS_CONVERSATION_LOCAL_FIRST" "true"
 
 Write-Host ""
-Write-Host "NVIDIA Nemotron 3 Ultra configurato come cervello primario." -ForegroundColor Green
-Write-Host "Qwen in LM Studio configurato come fallback locale." -ForegroundColor Green
+Write-Host "NVIDIA Nemotron 3 Ultra configurato per richieste pesanti e operative." -ForegroundColor Green
+Write-Host "Qwen in LM Studio configurato come percorso realtime per la conversazione." -ForegroundColor Green
+Write-Host "Se Qwen locale non risponde, JARVIS passa automaticamente ai provider cloud configurati." -ForegroundColor Green
 Write-Host "Nessun fallback a pagamento viene abilitato da questo script." -ForegroundColor Green
 Write-Host ""
-Write-Host "Lascia LM Studio aperto con Qwen caricato per avere il fallback locale." -ForegroundColor Yellow
+Write-Host "Lascia LM Studio aperto con Qwen caricato per ottenere la latenza vocale minima." -ForegroundColor Yellow
 Write-Host "Poi avvia: powershell -ExecutionPolicy Bypass -File .\run-local.ps1"
